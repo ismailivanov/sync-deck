@@ -198,11 +198,19 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.pendingDeletes = Array.isArray(data.pendingDeletes) ? data.pendingDeletes : [];
     data.syncedHashes = data.syncedHashes && typeof data.syncedHashes === "object" ? data.syncedHashes : {};
     data.deferredDeletePath = typeof data.deferredDeletePath === "string" ? data.deferredDeletePath : null;
+    // Two roles only. Migrate legacy "Owner"/"User" records to "Admin"/"Worker".
+    data.role = data.role === "Admin" || data.role === "Owner" ? "Admin" : "Worker";
+    data.vaultOwner = typeof data.vaultOwner === "string" ? data.vaultOwner : "";
+    data.members = data.members.map((member) => {
+      if (!member) return member;
+      const role = member.role === "Admin" || member.role === "Owner" ? "Admin" : "Worker";
+      return Object.assign({}, member, { role });
+    });
     if (data.signedIn && data.user.email && !DEMO_MEMBER_EMAILS.has(data.user.email)) {
       const current = {
         name: data.user.name || data.user.email,
         email: data.user.email,
-        role: data.role || data.user.role || "User",
+        role: data.role,
         color: data.user.color || "#8b5cf6",
         picture: data.user.picture || "",
         status: "online",
@@ -220,7 +228,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     const current = {
       name: this.data.user.name || this.data.user.email,
       email: this.data.user.email,
-      role: this.data.role || this.data.user.role || "User",
+      role: this.data.role || "Worker",
       color: this.data.user.color || "#8b5cf6",
       picture: this.data.user.picture || "",
       status: "online",
@@ -293,13 +301,70 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async markVaultAccessDenied(action) {
+    // The server reports we are no longer a member of this vault (an admin
+    // removed us, or we never had access). Leave it entirely: switch to a fresh
+    // personal vault so the shared vault stops appearing as joined and can no
+    // longer sync. Local files stay on disk but are detached from the cloud vault.
     this.data.serverStatus = "online";
     this.data.syncEnabled = false;
     this.data.syncProgress = 0;
     this.data.vaultStats.syncedFiles = 0;
-    this.pushQueueItem(action, "Vault access", 0, "failed: join or sign in again");
+    this.data.vaultId = uid("vault");
+    this.data.role = "Admin";
+    this.data.members = [];
+    this.data.vaultOwner = this.data.user.email || "";
+    this.data.remoteKnownPaths = [];
+    this.data.remoteKnownVaultId = "";
+    this.data.pendingDeletes = [];
+    this.data.syncedHashes = {};
+    this.data.remoteUpdatedAt = "";
+    this.pushQueueItem(action, "Vault access", 0, "removed from vault");
     await this.savePluginData();
-    new Notice("This Google account cannot access this vault. Use Join with an invite code, or sign out and sign in as the owner.");
+    new Notice("You no longer have access to this vault, so it has been removed. Ask an admin for a new invite to rejoin.");
+  }
+
+  async fetchVaultMembers() {
+    if (!this.data.signedIn || !this.data.authToken || !this.data.vaultId) return;
+    try {
+      const result = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/members`);
+      const members = Array.isArray(result.members) ? result.members : [];
+      const role = (result.you && result.you.role) || this.data.role;
+      const owner = result.owner || this.data.vaultOwner || "";
+      const changed =
+        JSON.stringify(members) !== JSON.stringify(this.data.members) ||
+        role !== this.data.role ||
+        owner !== this.data.vaultOwner;
+      this.data.members = members;
+      this.data.role = role;
+      this.data.vaultOwner = owner;
+      this.data.serverStatus = "online";
+      if (changed) await this.savePluginData();
+    } catch (error) {
+      if (isVaultAccessError(error)) {
+        await this.markVaultAccessDenied("members");
+      }
+      // Other errors (offline, vault not registered yet) are non-fatal here.
+    }
+  }
+
+  async removeVaultMember(email) {
+    if (!this.data.signedIn || !this.data.vaultId || !email) return;
+    if ((this.data.role || "") !== "Admin") {
+      new Notice("Only an admin can remove members.");
+      return;
+    }
+    try {
+      const result = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/members/remove`, {
+        method: "POST",
+        body: { email },
+      });
+      if (Array.isArray(result.members)) this.data.members = result.members;
+      if (result.owner) this.data.vaultOwner = result.owner;
+      await this.savePluginData();
+      new Notice(`Removed ${email} from the vault.`);
+    } catch (error) {
+      new Notice(`Could not remove member: ${error.message}`);
+    }
   }
 
   compactQueue(queue) {
@@ -817,6 +882,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
         this.data.syncEnabled = false;
         await this.registerVault();
       }
+      await this.fetchVaultMembers();
       await this.savePluginData();
       new Notice("Signed in with Google.");
     } catch (error) {
@@ -870,6 +936,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       await this.registerVault();
       const invite = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/invites`, { method: "POST" });
       if (navigator.clipboard) await navigator.clipboard.writeText(invite.code).catch(() => {});
+      await this.fetchVaultMembers();
       new Notice(`Invite code copied: ${invite.code}`);
     } catch (error) {
       if (isVaultAccessError(error)) {
@@ -893,11 +960,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
       const result = await this.api(`/invites/${encodeURIComponent(code.trim())}/accept`, { method: "POST" });
       this.data.vaultId = result.vaultId;
       this.data.workspace = result.workspace || this.data.workspace;
-      this.data.role = result.role || "User";
+      this.data.role = result.role || "Worker";
+      this.data.vaultOwner = result.owner || this.data.vaultOwner || "";
       this.data.members = Array.isArray(result.members) ? result.members : this.data.members;
       await this.savePluginData();
+      await this.fetchVaultMembers();
       await this.pullLatest();
-      new Notice(`Joined ${this.data.workspace}.`);
+      new Notice(`Joined ${this.data.workspace} as ${this.data.role}.`);
     } catch (error) {
       new Notice(`Could not join invite: ${error.message}`);
     }
