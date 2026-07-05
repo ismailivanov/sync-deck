@@ -408,7 +408,7 @@ const {
 const { SyncDeckView } = __require("src/view.js");
 const { SyncDeckSettingTab } = __require("src/settings-tab.js");
 
-const REMOTE_POLL_INTERVAL_MS = 4000;
+const REMOTE_POLL_INTERVAL_MS = 1500;
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -735,7 +735,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     try {
       await this.registerVault();
       await this.pushScanSummary();
-      if (options.upload) await this.uploadVaultFiles(syncableFiles);
+      if (options.upload) await this.uploadVaultFiles(syncableFiles, { incremental: options.incremental });
     } catch (error) {
       if (isVaultAccessError(error)) {
         await this.markVaultAccessDenied("sync");
@@ -751,14 +751,27 @@ module.exports = class SyncDeckPlugin extends Plugin {
     return true;
   }
 
-  async uploadVaultFiles(files) {
+  async uploadVaultFiles(files, options = {}) {
     if (!this.data.authToken) return;
+
+    // Incremental uploads skip files whose content is unchanged since the last
+    // sync, so a single card edit uploads one file instead of the whole vault.
+    // A full (non-incremental) upload rebuilds the signature cache from scratch,
+    // which is what manual / toggle / first-time sync uses as a safety net.
+    const incremental = !!options.incremental;
+    const previous = this.uploadedSignatures || {};
+    const nextSignatures = {};
 
     let syncedFiles = 0;
     let syncedBytes = 0;
     const paths = [];
 
     for (const file of files) {
+      const signature = `${file.stat.mtime || 0}:${file.stat.size || 0}`;
+      paths.push(file.path);
+      nextSignatures[file.path] = signature;
+      if (incremental && previous[file.path] === signature) continue;
+
       const contentBase64 = arrayBufferToBase64(await this.app.vault.readBinary(file));
       await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
         method: "POST",
@@ -777,8 +790,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
       syncedFiles += 1;
       syncedBytes += file.stat.size || 0;
-      paths.push(file.path);
     }
+    this.uploadedSignatures = nextSignatures;
 
     await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/prune`, {
       method: "POST",
@@ -927,11 +940,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
       this.autoSyncRunning = true;
       try {
-        await this.scanVault({ upload: true });
+        await this.scanVault({ upload: true, incremental: true });
       } finally {
         this.autoSyncRunning = false;
       }
-    }, 2000);
+    }, 600);
   }
 
   async signIn() {
