@@ -399,9 +399,8 @@ const { isMarkdownPath, isIgnoredPath } = __require("src/helpers.js");
 // open, and a status-bar note that they are there. It is deliberately built as
 // an absolutely-positioned overlay driven by the editor's read-only coordsAtPos
 // API — it never mutates the editor, so a bug here cannot break typing.
-const SEND_ACTIVE_MS = 250; // presence post interval while others are present
+const SEND_ACTIVE_MS = 180; // presence post interval while others are present
 const SEND_IDLE_MS = 1500; // interval while alone (still refresh + detect peers)
-const PEER_TTL_MS = 12000; // drop a peer we have not heard about in this long
 
 class EditorPresence {
   constructor(plugin) {
@@ -413,11 +412,13 @@ class EditorPresence {
     this.layer = null;
     this.statusEl = null;
     this.timer = null;
-    this.rafId = null;
+    this.renderRaf = null;
+    this.scrollEl = null;
+    this.onMoveBound = null;
+    this.scrollSettle = null;
     this.inFlight = false;
     this.disposed = false;
     this.tickBound = () => this.tick();
-    this.frameBound = () => this.frame();
   }
 
   start() {
@@ -482,6 +483,23 @@ class EditorPresence {
       this.layer = document.createElement("div");
       this.layer.className = "sd-editor-cursors";
       document.body.appendChild(this.layer);
+      // Re-place carets only when the view actually moves (scroll/resize), never
+      // on a per-frame loop — the old per-frame coordsAtPos was what made the
+      // editor jank. On scroll we drop the CSS transition so carets track exactly.
+      const cm = this.editor && this.editor.cm;
+      this.scrollEl = cm && cm.scrollDOM ? cm.scrollDOM : null;
+      this.onMoveBound = () => {
+        if (this.layer) {
+          this.layer.classList.add("is-scrolling");
+          if (this.scrollSettle) window.clearTimeout(this.scrollSettle);
+          this.scrollSettle = window.setTimeout(() => {
+            if (this.layer) this.layer.classList.remove("is-scrolling");
+          }, 150);
+        }
+        this.scheduleRender();
+      };
+      if (this.scrollEl) this.scrollEl.addEventListener("scroll", this.onMoveBound, { passive: true });
+      window.addEventListener("resize", this.onMoveBound, { passive: true });
     } catch (error) {
       this.layer = null;
     }
@@ -489,7 +507,14 @@ class EditorPresence {
 
   teardown() {
     if (this.timer) { window.clearTimeout(this.timer); this.timer = null; }
-    if (this.rafId != null) { cancelAnimationFrame(this.rafId); this.rafId = null; }
+    if (this.renderRaf != null) { cancelAnimationFrame(this.renderRaf); this.renderRaf = null; }
+    if (this.scrollSettle) { window.clearTimeout(this.scrollSettle); this.scrollSettle = null; }
+    if (this.onMoveBound) {
+      if (this.scrollEl) this.scrollEl.removeEventListener("scroll", this.onMoveBound);
+      window.removeEventListener("resize", this.onMoveBound);
+    }
+    this.scrollEl = null;
+    this.onMoveBound = null;
     if (this.layer && this.layer.parentElement) this.layer.remove();
     this.layer = null;
     this.editor = null;
@@ -552,7 +577,6 @@ class EditorPresence {
 
   applyPeers(peers) {
     if (!Array.isArray(peers)) return;
-    const now = Date.now();
     const seen = new Set();
     peers.forEach((p) => {
       if (!p || !p.email || !Number.isFinite(p.line) || !Number.isFinite(p.ch)) return;
@@ -564,38 +588,29 @@ class EditorPresence {
       entry.editing = !!p.editing;
       entry.line = p.line;
       entry.ch = p.ch;
-      entry.lastSeen = now;
     });
+    // The server returns all active peers, so anyone absent has left -> remove.
     this.peers.forEach((entry, email) => {
       if (seen.has(email)) return;
       if (entry.el && entry.el.parentElement) entry.el.remove();
       this.peers.delete(email);
     });
     this.renderStatus();
-    this.ensureFrame();
+    this.scheduleRender();
   }
 
-  ensureFrame() {
-    if (this.rafId != null) return;
-    if (!this.layer || this.peers.size === 0) return;
-    this.rafId = requestAnimationFrame(this.frameBound);
-  }
-
-  frame() {
-    this.rafId = null;
-    if (!this.layer || !this.editor || this.peers.size === 0) return;
-
-    // Drop peers we have not heard about within the TTL (e.g. during an outage
-    // that keeps failing ticks) so this loop can settle instead of spinning.
-    const cutoff = Date.now() - PEER_TTL_MS;
-    this.peers.forEach((entry, email) => {
-      if ((entry.lastSeen || 0) < cutoff) {
-        if (entry.el && entry.el.parentElement) entry.el.remove();
-        this.peers.delete(email);
-      }
+  // Coalesce redraws into a single rAF. Called only on real changes (a presence
+  // update, scroll, or resize) — NOT every frame — so there is no idle CPU cost.
+  scheduleRender() {
+    if (this.disposed || this.renderRaf != null || !this.layer) return;
+    this.renderRaf = requestAnimationFrame(() => {
+      this.renderRaf = null;
+      this.renderCursors();
     });
-    if (this.peers.size === 0) { this.renderStatus(); return; }
+  }
 
+  renderCursors() {
+    if (!this.layer || !this.editor || this.peers.size === 0) return;
     const cm = this.editor.cm;
     const scrollRect = cm && cm.scrollDOM ? cm.scrollDOM.getBoundingClientRect() : null;
     this.peers.forEach((entry) => {
@@ -605,8 +620,6 @@ class EditorPresence {
         && px.left >= scrollRect.left - 2 && px.left <= scrollRect.right + 2);
       this.drawCaret(entry, px, visible);
     });
-    // Recompute every frame so carets track scrolling; peers are rare so this is cheap.
-    this.rafId = requestAnimationFrame(this.frameBound);
   }
 
   coordsFor(entry) {
@@ -680,7 +693,8 @@ const { SyncDeckView } = __require("src/view.js");
 const { SyncDeckSettingTab } = __require("src/settings-tab.js");
 const { EditorPresence } = __require("src/editor-presence.js");
 
-const REMOTE_POLL_INTERVAL_MS = 1500;
+const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
+const REMOTE_POLL_ACTIVE_MS = 400; // fast poll while collaborating on the open file
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -800,8 +814,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   onunload() {
+    this.unloaded = true;
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
-    if (this.remotePollTimer) window.clearInterval(this.remotePollTimer);
+    if (this.remotePollTimer) window.clearTimeout(this.remotePollTimer);
     if (this.editorPresence) this.editorPresence.stop();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
@@ -1155,8 +1170,20 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   startRemotePolling() {
-    if (this.remotePollTimer) window.clearInterval(this.remotePollTimer);
-    this.remotePollTimer = window.setInterval(() => this.pollRemoteChanges(), REMOTE_POLL_INTERVAL_MS);
+    if (this.remotePollTimer) window.clearTimeout(this.remotePollTimer);
+    const loop = async () => {
+      try {
+        await this.pollRemoteChanges();
+      } catch (error) {
+        // pollRemoteChanges handles its own errors; never let the loop die
+      }
+      if (this.unloaded) return; // do not re-arm after the plugin was unloaded
+      // Poll fast while someone else is on the same file (active collaboration),
+      // relaxed otherwise, so changes feel near-instant without constant load.
+      const collaborating = this.editorPresence && this.editorPresence.peers && this.editorPresence.peers.size > 0;
+      this.remotePollTimer = window.setTimeout(loop, collaborating ? REMOTE_POLL_ACTIVE_MS : REMOTE_POLL_INTERVAL_MS);
+    };
+    this.remotePollTimer = window.setTimeout(loop, REMOTE_POLL_ACTIVE_MS);
   }
 
   async pollRemoteChanges() {
@@ -1367,6 +1394,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
     this.autoSyncTimer = window.setTimeout(async () => {
       this.autoSyncTimer = null;
+      if (this.unloaded) return;
       if (!this.data.signedIn || !this.data.syncEnabled) return;
       // Never run an upload while a pull is in flight: both mutate remoteKnownPaths
       // and an interleave can misread a just-uploaded file as a remote deletion.
@@ -1378,7 +1406,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       } finally {
         this.autoSyncRunning = false;
       }
-    }, 600);
+    }, 250);
   }
 
   async signIn() {

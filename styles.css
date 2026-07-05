@@ -368,6 +368,12 @@
   left: 0;
   width: 2px;
   will-change: transform;
+  transition: transform 120ms linear;
+}
+
+/* While the editor is scrolling, drop the transition so carets track exactly. */
+.sd-editor-cursors.is-scrolling .sd-editor-cursor {
+  transition: none;
 }
 
 .sd-editor-caret {
