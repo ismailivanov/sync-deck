@@ -17,6 +17,7 @@ const { EditorPresence } = require("./editor-presence");
 
 const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
 const REMOTE_POLL_ACTIVE_MS = 400; // fast poll while collaborating on the open file
+const ACCESS_CHECK_INTERVAL_MS = 10000; // while sync is paused, re-verify vault membership this often
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -739,8 +740,22 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async pollRemoteChanges() {
-    if (!this.data.signedIn || !this.data.syncEnabled) return;
+    if (!this.data.signedIn) return;
     if (this.autoSyncRunning || this.remotePullRunning) return;
+
+    // Paused but still signed in: keep verifying vault access on a slow cadence.
+    // This is what makes removal reliable — an admin removing us drops the vault
+    // even when sync is off AND the SyncDeck panel is closed (the panel's own
+    // members timer only runs while it is open). Owners are never removed, so we
+    // skip the check for our own vault to avoid needless load.
+    if (!this.data.syncEnabled) {
+      if (this.data.vaultOwner && this.data.vaultOwner === this.data.user.email) return;
+      const now = Date.now();
+      if (this._lastAccessCheck && now - this._lastAccessCheck < ACCESS_CHECK_INTERVAL_MS) return;
+      this._lastAccessCheck = now;
+      await this.fetchVaultMembers(); // GET /members; a 403 triggers markVaultAccessDenied
+      return;
+    }
 
     try {
       await this.registerVault();
