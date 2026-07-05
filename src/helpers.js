@@ -33,6 +33,7 @@ const DEFAULT_DATA = {
   role: "Owner",
   syncEnabled: false,
   syncProgress: 0,
+  remoteUpdatedAt: "",
   lastSync: "",
   storageUsedMb: 0,
   storageLimitMb: 1024,

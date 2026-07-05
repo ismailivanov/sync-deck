@@ -36,6 +36,7 @@ const DEFAULT_DATA = {
   role: "Owner",
   syncEnabled: false,
   syncProgress: 0,
+  remoteUpdatedAt: "",
   lastSync: "",
   storageUsedMb: 0,
   storageLimitMb: 1024,
@@ -407,6 +408,8 @@ const {
 const { SyncDeckView } = __require("src/view.js");
 const { SyncDeckSettingTab } = __require("src/settings-tab.js");
 
+const REMOTE_POLL_INTERVAL_MS = 10000;
+
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
@@ -519,10 +522,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
       name: "Open SyncDeck",
       callback: () => this.activateView(),
     });
+    this.startRemotePolling();
   }
 
   onunload() {
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
+    if (this.remotePollTimer) window.clearInterval(this.remotePollTimer);
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
 
@@ -547,6 +552,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.serverUrl = data.serverUrl || DEFAULT_DATA.serverUrl;
     data.authToken = data.authToken || "";
     data.serverStatus = data.serverStatus || "offline";
+    data.remoteUpdatedAt = data.remoteUpdatedAt || "";
     data.vaultStats = Object.assign(clone(DEFAULT_DATA.vaultStats), data.vaultStats || {});
     data.members = Array.isArray(data.members)
       ? data.members.filter((member) => member && !DEMO_MEMBER_EMAILS.has(member.email))
@@ -799,40 +805,73 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }
   }
 
-  async pullLatest() {
-    if (!this.data.signedIn) {
-      new Notice("Sign in first.");
-      return;
-    }
+  startRemotePolling() {
+    if (this.remotePollTimer) window.clearInterval(this.remotePollTimer);
+    this.remotePollTimer = window.setInterval(() => this.pollRemoteChanges(), REMOTE_POLL_INTERVAL_MS);
+  }
+
+  async pollRemoteChanges() {
+    if (!this.data.signedIn || !this.data.syncEnabled) return;
+    if (this.autoSyncRunning || this.remotePullRunning) return;
 
     try {
       await this.registerVault();
       const manifest = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) return;
+      await this.pullLatest({ manifest, silent: true });
+    } catch (error) {
+      if (isVaultAccessError(error)) {
+        await this.markVaultAccessDenied("poll");
+        return;
+      }
+      this.data.serverStatus = "offline";
+      this.pushQueueItem("pull", "Remote vault", 0, `failed: ${error.message}`);
+      await this.savePluginData();
+    }
+  }
+
+  async pullLatest(options = {}) {
+    if (!this.data.signedIn) {
+      if (!options.silent) new Notice("Sign in first.");
+      return;
+    }
+    if (this.remotePullRunning) return;
+
+    this.remotePullRunning = true;
+    try {
+      await this.registerVault();
+      const manifest = options.manifest || await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
       let pulledFiles = 0;
       let pulledBytes = 0;
 
-      for (const remoteFile of manifest.files || []) {
-        if (!remoteFile.path || isIgnoredPath(remoteFile.path)) continue;
+      this.applyingRemoteChanges = true;
+      try {
+        for (const remoteFile of manifest.files || []) {
+          if (!remoteFile.path || isIgnoredPath(remoteFile.path)) continue;
 
-        const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
-        if (localFile instanceof TFile && (localFile.stat.mtime || 0) >= (remoteFile.mtime || 0)) continue;
+          const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
+          if (localFile instanceof TFile && (localFile.stat.mtime || 0) >= (remoteFile.mtime || 0)) continue;
 
-        const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
-        const content = base64ToArrayBuffer(remote.contentBase64);
-        await this.ensureParentFolder(remoteFile.path);
+          const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
+          const content = base64ToArrayBuffer(remote.contentBase64);
+          await this.ensureParentFolder(remoteFile.path);
 
-        if (localFile instanceof TFile) await this.app.vault.modifyBinary(localFile, content);
-        else await this.app.vault.createBinary(remoteFile.path, content);
+          if (localFile instanceof TFile) await this.app.vault.modifyBinary(localFile, content);
+          else await this.app.vault.createBinary(remoteFile.path, content);
 
-        pulledFiles += 1;
-        pulledBytes += remoteFile.size || 0;
+          pulledFiles += 1;
+          pulledBytes += remoteFile.size || 0;
+        }
+      } finally {
+        this.applyingRemoteChanges = false;
       }
 
       this.data.serverStatus = "online";
+      this.data.remoteUpdatedAt = manifest.updatedAt || this.data.remoteUpdatedAt;
       this.data.lastSync = new Date().toLocaleString();
       this.pushQueueItem("pull", "Remote vault", pulledBytes, "done");
       await this.scanVault();
-      new Notice(pulledFiles ? `Pulled ${pulledFiles} files.` : "Vault already up to date.");
+      if (!options.silent) new Notice(pulledFiles ? `Pulled ${pulledFiles} files.` : "Vault already up to date.");
     } catch (error) {
       if (isVaultAccessError(error)) {
         await this.markVaultAccessDenied("pull");
@@ -841,7 +880,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.serverStatus = "offline";
       this.pushQueueItem("pull", "Remote vault", 0, `failed: ${error.message}`);
       await this.savePluginData();
-      new Notice(`Pull failed: ${error.message}`);
+      if (!options.silent) new Notice(`Pull failed: ${error.message}`);
+    } finally {
+      this.remotePullRunning = false;
     }
   }
 
@@ -862,6 +903,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async handleVaultEvent(action, file, oldPath = "") {
+    if (this.applyingRemoteChanges) return;
     if (!this.data.syncEnabled) return;
     const path = file && file.path ? file.path : oldPath;
     if (!path || isIgnoredPath(path)) return;
