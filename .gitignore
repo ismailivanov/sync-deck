@@ -4,3 +4,4 @@ server/server.log
 server/server.pid
 server/storage/
 .DS_Store
+.claude/launch.json
