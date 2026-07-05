@@ -1297,6 +1297,20 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.syncProgress = options.upload ? 0 : 100;
     this.data.lastSync = new Date().toLocaleString();
     this.pushQueueItem("scan", "Full vault", stats.syncableBytes, "done");
+    if (options.upload) {
+      // Serialize with pulls: wait out any in-flight pull, then claim the upload
+      // slot so a concurrent poll cannot start a pull mid-upload. This is the
+      // same mutual exclusion scheduleAutoSync already uses, extended to the
+      // direct upload callers (toggleSync / finishScan / createInvite /
+      // joinInvite) so upload and pull can never interleave and misread a
+      // just-uploaded path as a remote deletion. Bounded so it can never hang.
+      let waited = 0;
+      while (this.remotePullRunning && waited < 5000) {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        waited += 40;
+      }
+      this.autoSyncRunning = true;
+    }
     try {
       await this.registerVault();
       await this.pushScanSummary();
@@ -1311,6 +1325,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
       new Notice(`Server sync failed: ${error.message}`);
       await this.savePluginData();
       return false;
+    } finally {
+      if (options.upload) this.autoSyncRunning = false;
     }
     await this.savePluginData();
     return true;
@@ -1344,6 +1360,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
     // if their signature looks unchanged. Snapshot so events during this run are
     // kept for the next sync rather than dropped.
     const dirty = new Set(this.dirtyUploadPaths || []);
+    // Capture-and-clear: drop this snapshot from the LIVE set now. If the user
+    // re-edits one of these files WHILE this upload is in flight, handleVaultEvent
+    // re-adds it to dirtyUploadPaths and that re-add survives to the next run —
+    // instead of being wiped by a blanket clear at the end (which could drop the
+    // second edit whenever its mtime:size signature happens to match the first).
+    if (this.dirtyUploadPaths) dirty.forEach((path) => this.dirtyUploadPaths.delete(path));
 
     let syncedFiles = 0;
     let syncedBytes = 0;
@@ -1393,7 +1415,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
     }
     this.uploadedSignatures = nextSignatures;
-    if (this.dirtyUploadPaths) dirty.forEach((path) => { if (!failed.has(path)) this.dirtyUploadPaths.delete(path); });
+    // Anything that failed to upload must stay dirty so it retries next run. The
+    // snapshot was already cleared at entry; a file re-edited mid-run has re-added
+    // itself and correctly survives.
+    if (this.dirtyUploadPaths) failed.forEach((path) => this.dirtyUploadPaths.add(path));
     if (failed.size) this.pushQueueItem("upload", `${failed.size} file(s) will retry`, 0, "retry");
 
     // Explicitly delete only the files THIS device intentionally removed: paths
@@ -1404,8 +1429,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
     const known = this.getRemoteKnownPaths();
     const sameVault = this.data.remoteKnownVaultId === this.data.vaultId;
     const pending = new Set(sameVault && Array.isArray(this.data.pendingDeletes) ? this.data.pendingDeletes : []);
+    // Never delete a path that only differs in CASE from one we just uploaded. A
+    // case-only rename (Note.md -> note.md) uploads note.md and would otherwise
+    // delete "Note.md" — which on a case-insensitive server disk is the very file
+    // we just wrote, destroying its bytes. Mirrors the pull-trash case guard.
+    const uploadedLower = new Set(paths.map((p) => p.toLowerCase()));
     const toDelete = Array.from(known).filter(
-      (path) => pending.has(path) && !this.app.vault.getAbstractFileByPath(path)
+      (path) => pending.has(path) && !this.app.vault.getAbstractFileByPath(path) && !uploadedLower.has(path.toLowerCase())
     );
     if (toDelete.length) {
       await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/delete`, {
@@ -1446,6 +1476,24 @@ module.exports = class SyncDeckPlugin extends Plugin {
       current = current ? `${current}/${part}` : part;
       if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
     }
+  }
+
+  // A free path next to `path` for holding the incoming version of a sync
+  // conflict, e.g. "notes/plan.md" -> "notes/plan (sync conflict).md". Never
+  // collides with an existing file.
+  conflictCopyPath(path) {
+    const slash = path.lastIndexOf("/");
+    const dot = path.lastIndexOf(".");
+    const hasExt = dot > slash;
+    const base = hasExt ? path.slice(0, dot) : path;
+    const ext = hasExt ? path.slice(dot) : "";
+    let candidate = `${base} (sync conflict)${ext}`;
+    let n = 2;
+    while (this.app.vault.getAbstractFileByPath(candidate)) {
+      candidate = `${base} (sync conflict ${n})${ext}`;
+      n += 1;
+    }
+    return candidate;
   }
 
   startRemotePolling() {
@@ -1523,8 +1571,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
           // cross-machine mtime, which clock skew makes unreliable and which was
           // silently skipping real edits). Seed the local hash once so we don't
           // needlessly re-pull identical content on the first sync after an update.
+          let hadPriorHash = false;
+          let knownHash;
           if (remoteFile.hash) {
-            let knownHash = this.data.syncedHashes[remoteFile.path];
+            hadPriorHash = this.data.syncedHashes[remoteFile.path] !== undefined;
+            knownHash = this.data.syncedHashes[remoteFile.path];
             if (knownHash === undefined && localFile instanceof TFile) {
               try {
                 knownHash = await sha256Hex(await this.app.vault.readBinary(localFile));
@@ -1535,6 +1586,31 @@ module.exports = class SyncDeckPlugin extends Plugin {
               if (knownHash) this.data.syncedHashes[remoteFile.path] = knownHash;
             }
             if (knownHash === remoteFile.hash) continue;
+          }
+
+          // CONFLICT GUARD: a local file exists, its content differs from the
+          // remote, and we have NO prior sync history for this path under this
+          // vault (hadPriorHash === false). That means two independent versions
+          // are meeting for the first time — typically the first pull right after
+          // joining a vault that already has a file at the same path. Overwriting
+          // would silently destroy the user's own content, so instead keep the
+          // local file and save the incoming version alongside it. Both versions
+          // then upload and coexist on every device; the user reconciles them.
+          if (remoteFile.hash && !hadPriorHash && localFile instanceof TFile && knownHash !== undefined) {
+            const remoteC = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
+            const remoteContent = base64ToArrayBuffer(remoteC.contentBase64);
+            const conflictPath = this.conflictCopyPath(remoteFile.path);
+            await this.ensureParentFolder(conflictPath);
+            this.pullTouchedPaths.add(conflictPath);
+            await this.app.vault.createBinary(conflictPath, remoteContent);
+            this.data.syncedHashes[conflictPath] = (remoteC.file && remoteC.file.hash) || (await sha256Hex(remoteContent)) || remoteFile.hash;
+            // Keep our local hash for the original path so the following upload
+            // pushes our version and it is not re-pulled as an echo.
+            this.data.syncedHashes[remoteFile.path] = knownHash;
+            pulledFiles += 1;
+            pulledBytes += remoteFile.size || 0;
+            if (!options.silent) new Notice(`Sync conflict on "${remoteFile.path}": kept your version, saved the incoming copy as "${conflictPath}".`);
+            continue;
           }
 
           this.pullTouchedPaths.add(remoteFile.path);
@@ -1792,7 +1868,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }
 
     try {
-      await this.registerVault();
+      // Sharing implies syncing: push our files up before handing out a code, so
+      // the joiner pulls real content instead of an empty vault, then enable
+      // continuous sync. Upload with sync still off so the poll loop can't race
+      // the upload; scanVault registers the vault as part of uploading.
+      this.data.syncEnabled = false;
+      await this.scanVault({ upload: true });
+      this.data.syncEnabled = true;
+      await this.savePluginData();
       const invite = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/invites`, { method: "POST" });
       if (navigator.clipboard) await navigator.clipboard.writeText(invite.code).catch(() => {});
       await this.fetchVaultMembers();
@@ -1822,10 +1905,33 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.role = result.role || "Worker";
       this.data.vaultOwner = result.owner || this.data.vaultOwner || "";
       this.data.members = Array.isArray(result.members) ? result.members : this.data.members;
+      // Joining a vault means "sync me", with no extra step. Start from a clean
+      // baseline: this is a fresh vault association, so any known-set / delete
+      // intent / hash cache from our previous vault must not carry over and
+      // drive a wrongful deletion against the new vault.
+      this.data.remoteKnownPaths = [];
+      this.data.remoteKnownVaultId = "";
+      this.data.pendingDeletes = [];
+      this.data.remoteUpdatedAt = "";
+      this.data.syncedHashes = {};
+      this.uploadedSignatures = {};
+      this.dirtyUploadPaths = new Set();
+      // Keep sync OFF during the initial two-way pass. The background poll loop
+      // only runs when syncEnabled, so this guarantees it cannot race and
+      // interleave an upload into our pull. We enable continuous sync only after
+      // the merge pass has fully, sequentially completed.
+      this.data.syncEnabled = false;
       await this.savePluginData();
       await this.fetchVaultMembers();
+      // Two-way first pass so the vault is usable right away: pull the shared
+      // files down (known-set is empty, so nothing local is trashed), then push
+      // our own local files into the vault.
       await this.pullLatest();
-      new Notice(`Joined ${this.data.workspace} as ${this.data.role}.`);
+      await this.scanVault({ upload: true });
+      // Hand off to the continuous loops (poll pulls, auto-sync uploads).
+      this.data.syncEnabled = true;
+      await this.savePluginData();
+      new Notice(`Joined ${this.data.workspace} as ${this.data.role}. Sync is on.`);
     } catch (error) {
       new Notice(`Could not join invite: ${error.message}`);
     }
