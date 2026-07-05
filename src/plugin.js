@@ -11,8 +11,8 @@ const {
   isMarkdownPath,
   uid,
 } = require("./helpers");
-const { SyncDeskView } = require("./view");
-const { SyncDeskSettingTab } = require("./settings-tab");
+const { SyncDeckView } = require("./view");
+const { SyncDeckSettingTab } = require("./settings-tab");
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -38,19 +38,19 @@ function base64ToArrayBuffer(value) {
   return bytes.buffer;
 }
 
-module.exports = class SyncDeskPlugin extends Plugin {
+module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
 
     addIcon(ICON_ID, ICON_SVG);
-    this.registerView(VIEW_TYPE, (leaf) => new SyncDeskView(leaf, this));
-    this.addSettingTab(new SyncDeskSettingTab(this.app, this));
+    this.registerView(VIEW_TYPE, (leaf) => new SyncDeckView(leaf, this));
+    this.addSettingTab(new SyncDeckSettingTab(this.app, this));
     this.registerVaultEvents();
 
-    this.addRibbonIcon(ICON_ID, "Open Sync Desk", () => this.activateView());
+    this.addRibbonIcon(ICON_ID, "Open SyncDeck", () => this.activateView());
     this.addCommand({
-      id: "open-sync-desk",
-      name: "Open Sync Desk",
+      id: "open-sync-deck",
+      name: "Open SyncDeck",
       callback: () => this.activateView(),
     });
   }

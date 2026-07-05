@@ -1,6 +1,6 @@
 const { PluginSettingTab, Setting } = require("obsidian");
 
-class SyncDeskSettingTab extends PluginSettingTab {
+class SyncDeckSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -11,14 +11,14 @@ class SyncDeskSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.addClass("sd-settings");
 
-    containerEl.createEl("h2", { text: "Sync Desk" });
+    containerEl.createEl("h2", { text: "SyncDeck" });
     containerEl.createEl("p", {
       text: "Realtime vault sync, team roles, and Task Deck collaboration.",
     });
 
     new Setting(containerEl)
       .setName("Dashboard")
-      .setDesc("Open the Sync Desk control panel.")
+      .setDesc("Open the SyncDeck control panel.")
       .addButton((button) => {
         button
           .setButtonText("Open")
@@ -66,4 +66,4 @@ class SyncDeskSettingTab extends PluginSettingTab {
   }
 }
 
-module.exports = { SyncDeskSettingTab };
+module.exports = { SyncDeckSettingTab };

@@ -3,8 +3,8 @@ const __modules = {
   "src/helpers.js": function(module, exports, __require) {
 const { setIcon } = require("obsidian");
 
-const VIEW_TYPE = "sync-desk-view";
-const ICON_ID = "sync-desk";
+const VIEW_TYPE = "sync-deck-view";
+const ICON_ID = "sync-deck";
 const ICON_SVG = `
   <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
     <rect x="16" y="20" width="30" height="24" rx="5" />
@@ -162,7 +162,7 @@ const {
   textButton,
 } = __require("src/helpers.js");
 
-class SyncDeskView extends ItemView {
+class SyncDeckView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -173,7 +173,7 @@ class SyncDeskView extends ItemView {
   }
 
   getDisplayText() {
-    return "Sync Desk";
+    return "SyncDeck";
   }
 
   getIcon() {
@@ -191,7 +191,7 @@ class SyncDeskView extends ItemView {
 
     const toolbar = createElement("div", "sd-toolbar");
     const title = createElement("div", "sd-toolbar-title");
-    title.append(createElement("h2", "", "Sync Desk"));
+    title.append(createElement("h2", "", "SyncDeck"));
     title.append(this.statusPill(data.serverStatus === "online" ? "API online" : "API offline", data.serverStatus === "online" ? "good" : "muted"));
     if (data.signedIn) title.append(this.avatar(data.user, "sd-profile-avatar"));
 
@@ -315,13 +315,13 @@ class SyncDeskView extends ItemView {
   }
 }
 
-module.exports = { SyncDeskView };
+module.exports = { SyncDeckView };
 
   },
   "src/settings-tab.js": function(module, exports, __require) {
 const { PluginSettingTab, Setting } = require("obsidian");
 
-class SyncDeskSettingTab extends PluginSettingTab {
+class SyncDeckSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -332,14 +332,14 @@ class SyncDeskSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.addClass("sd-settings");
 
-    containerEl.createEl("h2", { text: "Sync Desk" });
+    containerEl.createEl("h2", { text: "SyncDeck" });
     containerEl.createEl("p", {
       text: "Realtime vault sync, team roles, and Task Deck collaboration.",
     });
 
     new Setting(containerEl)
       .setName("Dashboard")
-      .setDesc("Open the Sync Desk control panel.")
+      .setDesc("Open the SyncDeck control panel.")
       .addButton((button) => {
         button
           .setButtonText("Open")
@@ -387,7 +387,7 @@ class SyncDeskSettingTab extends PluginSettingTab {
   }
 }
 
-module.exports = { SyncDeskSettingTab };
+module.exports = { SyncDeckSettingTab };
 
   },
   "src/plugin.js": function(module, exports, __require) {
@@ -404,8 +404,8 @@ const {
   isMarkdownPath,
   uid,
 } = __require("src/helpers.js");
-const { SyncDeskView } = __require("src/view.js");
-const { SyncDeskSettingTab } = __require("src/settings-tab.js");
+const { SyncDeckView } = __require("src/view.js");
+const { SyncDeckSettingTab } = __require("src/settings-tab.js");
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -431,19 +431,19 @@ function base64ToArrayBuffer(value) {
   return bytes.buffer;
 }
 
-module.exports = class SyncDeskPlugin extends Plugin {
+module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
 
     addIcon(ICON_ID, ICON_SVG);
-    this.registerView(VIEW_TYPE, (leaf) => new SyncDeskView(leaf, this));
-    this.addSettingTab(new SyncDeskSettingTab(this.app, this));
+    this.registerView(VIEW_TYPE, (leaf) => new SyncDeckView(leaf, this));
+    this.addSettingTab(new SyncDeckSettingTab(this.app, this));
     this.registerVaultEvents();
 
-    this.addRibbonIcon(ICON_ID, "Open Sync Desk", () => this.activateView());
+    this.addRibbonIcon(ICON_ID, "Open SyncDeck", () => this.activateView());
     this.addCommand({
-      id: "open-sync-desk",
-      name: "Open Sync Desk",
+      id: "open-sync-deck",
+      name: "Open SyncDeck",
       callback: () => this.activateView(),
     });
   }

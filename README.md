@@ -1,6 +1,6 @@
-# Sync Desk
+# SyncDeck
 
-Sync Desk is an Obsidian cloud sync plugin for team vaults.
+SyncDeck is an Obsidian cloud sync plugin for team vaults.
 
 The current build includes:
 
@@ -16,10 +16,10 @@ Realtime presence, conflict handling, and billing will come later.
 Clone the repo directly into an Obsidian plugin folder:
 
 ```bash
-git clone git@github.com:ismailivanov/SyncDesk.git "/path/to/vault/.obsidian/plugins/sync-desk"
+git clone git@github.com:ismailivanov/SyncDeck.git "/path/to/vault/.obsidian/plugins/sync-deck"
 ```
 
-Then enable **Sync Desk** from Obsidian's Community plugins screen.
+Then enable **SyncDeck** from Obsidian's Community plugins screen.
 
 ## Local API
 

@@ -1,7 +1,7 @@
 const { setIcon } = require("obsidian");
 
-const VIEW_TYPE = "sync-desk-view";
-const ICON_ID = "sync-desk";
+const VIEW_TYPE = "sync-deck-view";
+const ICON_ID = "sync-deck";
 const ICON_SVG = `
   <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
     <rect x="16" y="20" width="30" height="24" rx="5" />

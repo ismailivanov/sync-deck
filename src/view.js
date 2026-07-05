@@ -10,7 +10,7 @@ const {
   textButton,
 } = require("./helpers");
 
-class SyncDeskView extends ItemView {
+class SyncDeckView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -21,7 +21,7 @@ class SyncDeskView extends ItemView {
   }
 
   getDisplayText() {
-    return "Sync Desk";
+    return "SyncDeck";
   }
 
   getIcon() {
@@ -39,7 +39,7 @@ class SyncDeskView extends ItemView {
 
     const toolbar = createElement("div", "sd-toolbar");
     const title = createElement("div", "sd-toolbar-title");
-    title.append(createElement("h2", "", "Sync Desk"));
+    title.append(createElement("h2", "", "SyncDeck"));
     title.append(this.statusPill(data.serverStatus === "online" ? "API online" : "API offline", data.serverStatus === "online" ? "good" : "muted"));
     if (data.signedIn) title.append(this.avatar(data.user, "sd-profile-avatar"));
 
@@ -163,4 +163,4 @@ class SyncDeskView extends ItemView {
   }
 }
 
-module.exports = { SyncDeskView };
+module.exports = { SyncDeckView };
