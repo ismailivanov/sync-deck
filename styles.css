@@ -107,6 +107,11 @@
   gap: 7px;
   padding: 6px 10px;
   font-weight: 700;
+  /* Keep each button on one line; when space is tight the flex-wrap on
+     .sd-toolbar-actions / .sd-panel-actions moves a whole button down instead
+     of wrapping a label like "Continue with Google" mid-word. */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .sd-text-button.mod-cta {
@@ -430,17 +435,44 @@
   font-size: 12px;
 }
 
+/* Query context: member rows respond to the PANEL's own width, not the
+   viewport. This is what the 900px media query cannot do — a SyncDeck leaf
+   can be dragged narrow while the window stays wide, so the media query never
+   fires but the panel is tiny. */
+.sd-panel-members {
+  container-type: inline-size;
+}
+
 .sd-member-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
+/* When the members panel itself is narrow, stack each row: name/email on top,
+   badge + Remove grouped on the left underneath, so nothing overflows. The
+   descendant selectors (0,2,0) outrank the base .sd-member-* rules (0,1,0) so
+   these win regardless of source order. */
+@container (max-width: 360px) {
+  .sd-member-list .sd-member-main {
+    flex-basis: 100%;
+  }
+
+  .sd-member-list .sd-member-side {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
 .sd-member-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  /* Wrap the side group (badge + Remove) below the name when the panel is
+     narrow — a SyncDeck leaf can be dragged well below the 900px media query,
+     which is viewport-based and never fires for a narrow sidebar. */
+  flex-wrap: wrap;
+  gap: 8px 10px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 10px;
   padding: 8px 10px;
@@ -452,7 +484,10 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  flex: 1;
+  /* Basis 0 so the name/email column shrinks-to-fill and keeps the badge +
+     Remove on the same line (ellipsizing the name) until the panel is narrow
+     enough for the container query below to stack the row. */
+  flex: 1 1 0;
 }
 
 .sd-member-avatar {
@@ -499,8 +534,13 @@
 .sd-member-side {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
-  flex: 0 0 auto;
+  min-width: 0;
+  /* When there is no room even on its own line, let the Remove button drop
+     under the role badge instead of overflowing the panel. */
+  flex: 0 1 auto;
+  flex-wrap: wrap;
 }
 
 .sd-role-badge {
