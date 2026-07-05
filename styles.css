@@ -352,3 +352,45 @@
     grid-column: 1 / -1;
   }
 }
+
+/* Live editor presence: remote member cursors drawn over the editor. */
+.sd-editor-cursors {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.sd-editor-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2px;
+  will-change: transform;
+}
+
+.sd-editor-caret {
+  position: absolute;
+  inset: 0;
+  width: 2px;
+  background: var(--sd-cursor-color, #8b5cf6);
+}
+
+.sd-editor-name {
+  position: absolute;
+  top: -14px;
+  left: 0;
+  padding: 1px 5px;
+  border-radius: 4px 4px 4px 0;
+  color: #fff;
+  background: var(--sd-cursor-color, #8b5cf6);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.sd-presence-status {
+  color: var(--text-muted);
+}
