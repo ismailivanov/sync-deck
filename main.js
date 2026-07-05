@@ -1055,6 +1055,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.remoteKnownPaths = Array.isArray(data.remoteKnownPaths) ? data.remoteKnownPaths : [];
     data.remoteKnownVaultId = typeof data.remoteKnownVaultId === "string" ? data.remoteKnownVaultId : "";
     data.pendingDeletes = Array.isArray(data.pendingDeletes) ? data.pendingDeletes : [];
+    // Folder sync (empty folders included). remoteKnownFolders carries its OWN
+    // vault tag (NOT the file tag) so setRemoteKnownPaths re-tagging the file
+    // baseline can never make a stale cross-vault folder baseline look current.
+    data.remoteKnownFolders = Array.isArray(data.remoteKnownFolders) ? data.remoteKnownFolders : [];
+    data.remoteKnownFoldersVaultId = typeof data.remoteKnownFoldersVaultId === "string" ? data.remoteKnownFoldersVaultId : "";
+    data.pendingFolderDeletes = Array.isArray(data.pendingFolderDeletes) ? data.pendingFolderDeletes : [];
     data.syncedHashes = data.syncedHashes && typeof data.syncedHashes === "object" ? data.syncedHashes : {};
     data.deferredDeletePath = typeof data.deferredDeletePath === "string" ? data.deferredDeletePath : null;
     // Two roles only. Migrate legacy "Owner"/"User" records to "Admin"/"Worker".
@@ -1175,6 +1181,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.remoteKnownPaths = [];
     this.data.remoteKnownVaultId = "";
     this.data.pendingDeletes = [];
+    this.data.remoteKnownFolders = [];
+    this.data.remoteKnownFoldersVaultId = "";
+    this.data.pendingFolderDeletes = [];
     this.data.syncedHashes = {};
     this.data.remoteUpdatedAt = "";
     this.pushQueueItem(action, "Vault access", 0, "removed from vault");
@@ -1346,6 +1355,68 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.remoteKnownVaultId = this.data.vaultId;
   }
 
+  // All real (non-ignored, non-dotfolder) folder paths in the vault, so empty
+  // folders can be synced too. The root is excluded.
+  getVaultFolders() {
+    const folders = new Set();
+    for (const f of this.app.vault.getAllLoadedFiles()) {
+      if (f instanceof TFolder && f.path && f.path !== "/" && !f.path.startsWith(".") && !isIgnoredPath(`${f.path}/`)) {
+        folders.add(f.path);
+      }
+    }
+    return folders;
+  }
+
+  getRemoteKnownFolders() {
+    if (this.data.remoteKnownFoldersVaultId !== this.data.vaultId) return new Set();
+    return new Set(this.data.remoteKnownFolders || []);
+  }
+
+  setRemoteKnownFolders(folders) {
+    this.data.remoteKnownFolders = Array.isArray(folders) ? folders : Array.from(folders);
+    this.data.remoteKnownFoldersVaultId = this.data.vaultId;
+  }
+
+  // Create a folder and all its missing ancestors, tagging each as pull-touched
+  // so our own create events are not misread as user creations.
+  async ensureFolder(folderPath) {
+    const parts = folderPath.split("/").filter(Boolean);
+    let cur = "";
+    for (const part of parts) {
+      cur = cur ? `${cur}/${part}` : part;
+      if (!this.app.vault.getAbstractFileByPath(cur)) {
+        if (this.pullTouchedPaths) this.pullTouchedPaths.add(cur);
+        await this.app.vault.createFolder(cur);
+      }
+    }
+  }
+
+  // Push local folder creations/deletions to the server as an add/remove delta.
+  // Only folders this device intentionally deleted (pendingFolderDeletes) are
+  // removed, so we never delete a folder another device just created.
+  async pushFolderChanges() {
+    const localFolders = this.getVaultFolders();
+    const knownFolders = this.getRemoteKnownFolders();
+    // Use the folder tag (getRemoteKnownFolders already treats a mismatched tag
+    // as empty). On a fresh/switched vault both known set and pending intents are
+    // ignored, so we add all local folders and remove none.
+    const sameVault = this.data.remoteKnownFoldersVaultId === this.data.vaultId;
+    const folderPending = new Set(sameVault && Array.isArray(this.data.pendingFolderDeletes) ? this.data.pendingFolderDeletes : []);
+    const add = Array.from(localFolders).filter((f) => !knownFolders.has(f));
+    const remove = Array.from(knownFolders).filter((f) => folderPending.has(f) && !localFolders.has(f));
+    if (add.length || remove.length) {
+      await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/folders`, {
+        method: "POST",
+        body: { add, remove },
+      });
+    }
+    const next = new Set(knownFolders);
+    add.forEach((f) => next.add(f));
+    remove.forEach((f) => next.delete(f));
+    this.setRemoteKnownFolders(Array.from(next));
+    this.data.pendingFolderDeletes = Array.from(folderPending).filter((f) => next.has(f) && !localFolders.has(f));
+  }
+
   async uploadVaultFiles(files, options = {}) {
     if (!this.data.authToken) return;
 
@@ -1458,6 +1529,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
       );
     }
 
+    // Sync folders (incl. empty ones) after files. Never let a folder-sync error
+    // fail the file upload that already succeeded; it retries on the next sync.
+    try {
+      await this.pushFolderChanges();
+    } catch (error) {
+      // leave remoteKnownFolders as-is so the delta is retried next sync
+    }
+
     this.data.vaultStats.syncedFiles = syncedFiles;
     this.data.vaultStats.syncedBytes = syncedBytes;
     this.data.syncProgress = files.length ? Math.round((syncedFiles / files.length) * 100) : 100;
@@ -1474,7 +1553,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
-      if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
+      if (!this.app.vault.getAbstractFileByPath(current)) {
+        // Tag pull-created parent folders as our own so their create events are
+        // not misread as user folder creations by handleVaultEvent.
+        if (this.pullTouchedPaths) this.pullTouchedPaths.add(current);
+        await this.app.vault.createFolder(current);
+      }
     }
   }
 
@@ -1650,18 +1734,6 @@ module.exports = class SyncDeckPlugin extends Plugin {
         // (b) the user has locally re-created/edited and not yet uploaded — either
         // would destroy content the user did not delete.
         const remotePathsLower = new Set(Array.from(remotePaths, (p) => p.toLowerCase()));
-        // Ancestor folders of files we trash, so we can remove any that a remote
-        // folder-deletion left empty (folders aren't in the manifest).
-        const emptiedFolders = new Set();
-        const recordAncestorFolders = (filePath) => {
-          const parts = filePath.split("/");
-          parts.pop();
-          let cur = "";
-          for (const part of parts) {
-            cur = cur ? `${cur}/${part}` : part;
-            emptiedFolders.add(cur);
-          }
-        };
         for (const file of this.app.vault.getFiles()) {
           if (isIgnoredPath(file.path)) continue;
           if (remotePaths.has(file.path) || !known.has(file.path)) continue;
@@ -1669,7 +1741,6 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (dirty.has(file.path)) continue;
           try {
             this.pullTouchedPaths.add(file.path);
-            recordAncestorFolders(file.path);
             await this.app.vault.trash(file, false);
             if (this.uploadedSignatures) delete this.uploadedSignatures[file.path];
             if (this.data.syncedHashes) delete this.data.syncedHashes[file.path];
@@ -1678,27 +1749,55 @@ module.exports = class SyncDeckPlugin extends Plugin {
             // ignore individual delete failures; a later pull retries
           }
         }
-        // Deleting a folder elsewhere reaches us as file deletions; the now-empty
-        // folder would otherwise linger. Remove folders that the trashes above
-        // left genuinely empty, deepest-first so nested empties collapse. A folder
-        // that still holds a kept file has children and is skipped.
-        const foldersDeepFirst = Array.from(emptiedFolders).sort(
-          (a, b) => b.split("/").length - a.split("/").length
-        );
-        for (const folderPath of foldersDeepFirst) {
-          if (!folderPath || folderPath.startsWith(".") || isIgnoredPath(`${folderPath}/`)) continue;
-          const folder = this.app.vault.getAbstractFileByPath(folderPath);
-          if (folder instanceof TFolder && folder.children.length === 0) {
+        // New baseline is the server truth (the manifest).
+        this.setRemoteKnownPaths(Array.from(remotePaths));
+
+        // Folder sync (empty folders included). Only when the server actually
+        // reports folders (Array.isArray) so an older server without the field
+        // can never drive a wrongful folder removal. Create folders present
+        // remotely but missing locally; remove folders we knew about that are
+        // gone remotely (deleted elsewhere) once they are empty. Because the
+        // manifest carries the explicit folder set, this correctly distinguishes
+        // "folder deleted" from "last file deleted but folder kept" — the kept
+        // folder stays in the manifest and is preserved on every device.
+        if (Array.isArray(manifest.folders)) {
+          const remoteFolders = new Set(
+            manifest.folders.filter((f) => f && !f.startsWith(".") && !isIgnoredPath(`${f}/`))
+          );
+          const knownFolders = this.getRemoteKnownFolders();
+          const createFolders = Array.from(remoteFolders)
+            .filter((f) => !this.app.vault.getAbstractFileByPath(f))
+            .sort((a, b) => a.split("/").length - b.split("/").length);
+          for (const folderPath of createFolders) {
             try {
-              this.pullTouchedPaths.add(folderPath);
-              await this.app.vault.trash(folder, false);
+              await this.ensureFolder(folderPath);
             } catch (error) {
               // ignore; a later pull retries
             }
           }
+          const removeFolders = Array.from(knownFolders)
+            .filter((f) => !remoteFolders.has(f))
+            .sort((a, b) => b.split("/").length - a.split("/").length);
+          // Folders we meant to remove but couldn't yet (still hold a kept/dirty
+          // file). Keep them in the known set so a later pull retries the removal
+          // once they become empty, instead of forgetting them.
+          const retainForRetry = new Set();
+          for (const folderPath of removeFolders) {
+            if (!folderPath || folderPath.startsWith(".") || isIgnoredPath(`${folderPath}/`)) continue;
+            const folder = this.app.vault.getAbstractFileByPath(folderPath);
+            if (folder instanceof TFolder && folder.children.length === 0) {
+              try {
+                this.pullTouchedPaths.add(folderPath);
+                await this.app.vault.trash(folder, false);
+              } catch (error) {
+                retainForRetry.add(folderPath); // trash failed; retry next pull
+              }
+            } else if (folder instanceof TFolder) {
+              retainForRetry.add(folderPath); // not empty yet; retry next pull
+            }
+          }
+          this.setRemoteKnownFolders([...remoteFolders, ...retainForRetry]);
         }
-        // New baseline is the server truth (the manifest).
-        this.setRemoteKnownPaths(Array.from(remotePaths));
       } finally {
         this.pullTouchedPaths = null;
         this.applyingRemoteChanges = false;
@@ -1749,6 +1848,21 @@ module.exports = class SyncDeckPlugin extends Plugin {
   async handleVaultEvent(action, file, oldPath = "") {
     const path = file && file.path ? file.path : oldPath;
     if (this.applyingRemoteChanges) {
+      // A genuine USER folder op racing our pull: route it to the folder set (not
+      // the file pendingDeletes) so a folder deletion/rename during a pull is not
+      // lost — otherwise the folder would reappear on the next pull. Our own
+      // pull-created folders are in pullTouchedPaths and ignored here.
+      if (file instanceof TFolder) {
+        if ((path && path.startsWith(".")) || (oldPath && oldPath.startsWith("."))) return;
+        const touched = this.pullTouchedPaths || new Set();
+        this.data.pendingFolderDeletes = Array.isArray(this.data.pendingFolderDeletes) ? this.data.pendingFolderDeletes : [];
+        const addFolderDelete = (p) => { if (p && !touched.has(p) && !this.data.pendingFolderDeletes.includes(p)) this.data.pendingFolderDeletes.push(p); };
+        const dropFolderDelete = (p) => { this.data.pendingFolderDeletes = this.data.pendingFolderDeletes.filter((x) => x !== p); };
+        if (action === "delete") addFolderDelete(path);
+        else if (action === "rename") { addFolderDelete(oldPath); if (!touched.has(path)) dropFolderDelete(path); }
+        else if (!touched.has(path)) dropFolderDelete(path); // user re-created it
+        return;
+      }
       // Our own pull fires create/modify/delete events. Ignore those (they are in
       // pullTouchedPaths), but still handle genuine USER changes racing the pull:
       const survivor = action !== "delete" && file && file.path ? file.path : null;
@@ -1770,6 +1884,22 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }
     if (!this.data.syncEnabled) return;
     if (!path || isIgnoredPath(path)) return;
+
+    // Folder create/delete/rename: track separately so empty folders sync. Files
+    // inside fire their own events; here we only manage the folder set. Dot/ignored
+    // folders are never synced.
+    if (file instanceof TFolder) {
+      if ((path && path.startsWith(".")) || (oldPath && oldPath.startsWith("."))) return;
+      this.data.pendingFolderDeletes = Array.isArray(this.data.pendingFolderDeletes) ? this.data.pendingFolderDeletes : [];
+      const addFolderDelete = (p) => { if (p && !this.data.pendingFolderDeletes.includes(p)) this.data.pendingFolderDeletes.push(p); };
+      const dropFolderDelete = (p) => { this.data.pendingFolderDeletes = this.data.pendingFolderDeletes.filter((x) => x !== p); };
+      if (action === "delete") addFolderDelete(path);
+      else if (action === "rename") { if (oldPath) addFolderDelete(oldPath); dropFolderDelete(path); }
+      else dropFolderDelete(path); // create => the folder exists; cancel any delete intent
+      await this.savePluginData();
+      this.scheduleAutoSync();
+      return;
+    }
 
     // A locally-originated change is always uploaded on the next sync, even if
     // its mtime/size signature happens to match the cache (incremental guard).
@@ -1944,6 +2074,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.remoteKnownPaths = [];
       this.data.remoteKnownVaultId = "";
       this.data.pendingDeletes = [];
+      this.data.remoteKnownFolders = [];
+      this.data.remoteKnownFoldersVaultId = "";
+      this.data.pendingFolderDeletes = [];
       this.data.remoteUpdatedAt = "";
       this.data.syncedHashes = {};
       this.uploadedSignatures = {};
