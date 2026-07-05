@@ -14,7 +14,7 @@ const {
 const { SyncDeckView } = require("./view");
 const { SyncDeckSettingTab } = require("./settings-tab");
 
-const REMOTE_POLL_INTERVAL_MS = 10000;
+const REMOTE_POLL_INTERVAL_MS = 4000;
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
