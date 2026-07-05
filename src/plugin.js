@@ -132,12 +132,6 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.startRemotePolling();
     this.editorPresence = new EditorPresence(this);
     this.editorPresence.start();
-    // A deletion deferred before shutdown (the file was being edited) is not
-    // re-detected by the poll, since remoteUpdatedAt is already current. Finish
-    // it once on startup if the file is no longer the one being edited.
-    if (this.data.deferredDeletePath && this.data.signedIn && this.data.syncEnabled) {
-      this.pullLatest({ silent: true }).catch(() => {});
-    }
   }
 
   onunload() {
@@ -302,15 +296,6 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("modify", (file) => this.handleVaultEvent("modify", file)));
     this.registerEvent(this.app.vault.on("delete", (file) => this.handleVaultEvent("delete", file)));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultEvent("rename", file, oldPath)));
-    // When the user leaves a file whose remote deletion we deferred, pull once
-    // to finish trashing it (it is no longer the active file).
-    this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
-      if (!this.data.deferredDeletePath || !this.data.signedIn || !this.data.syncEnabled) return;
-      const active = this.app.workspace.getActiveFile();
-      if (this.data.deferredDeletePath !== (active ? active.path : null)) {
-        this.pullLatest({ silent: true }).catch(() => {});
-      }
-    }));
   }
 
   async isTaskDeckFile(file) {
@@ -543,11 +528,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       let pulledFiles = 0;
       let pulledBytes = 0;
       let trashedFiles = 0;
-      let deferredActiveDeletion = false;
-      // Never overwrite or delete the file the user is actively editing out from
-      // under them; it reconciles on a later pull once they switch away.
-      const activeFile = this.app.workspace.getActiveFile();
-      const activePath = activeFile ? activeFile.path : null;
+      // Skip pulling/trashing a file that has un-uploaded LOCAL edits (dirty), so
+      // we never clobber the user's own unsaved work — but DO sync a file the user
+      // is only viewing, so others' edits and deletions show up live.
+      const dirty = this.dirtyUploadPaths || new Set();
       // Snapshot the known-set at entry so a concurrent upload cannot make a
       // just-added path look like a remote deletion mid-pull.
       const known = this.getRemoteKnownPaths();
@@ -560,7 +544,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       try {
         for (const remoteFile of manifest.files || []) {
           if (!remoteFile.path || isIgnoredPath(remoteFile.path)) continue;
-          if (remoteFile.path === activePath) continue;
+          if (dirty.has(remoteFile.path)) continue;
 
           const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
           if (localFile instanceof TFile && (localFile.stat.mtime || 0) >= (remoteFile.mtime || 0)) continue;
@@ -600,9 +584,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
         // (b) the user has locally re-created/edited and not yet uploaded — either
         // would destroy content the user did not delete.
         const remotePathsLower = new Set(Array.from(remotePaths, (p) => p.toLowerCase()));
-        const dirty = this.dirtyUploadPaths || new Set();
         for (const file of this.app.vault.getFiles()) {
-          if (isIgnoredPath(file.path) || file.path === activePath) continue;
+          if (isIgnoredPath(file.path)) continue;
           if (remotePaths.has(file.path) || !known.has(file.path)) continue;
           if (remotePathsLower.has(file.path.toLowerCase())) continue;
           if (dirty.has(file.path)) continue;
@@ -615,14 +598,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
             // ignore individual delete failures; a later pull retries
           }
         }
-        // New baseline is the server truth (manifest). Keep a deferred deletion
-        // of the active file so it still propagates once the user leaves it.
-        const nextKnown = new Set(remotePaths);
-        if (activePath && known.has(activePath) && !remotePaths.has(activePath)) {
-          nextKnown.add(activePath);
-          deferredActiveDeletion = true;
-        }
-        this.setRemoteKnownPaths(Array.from(nextKnown));
+        // New baseline is the server truth (the manifest).
+        this.setRemoteKnownPaths(Array.from(remotePaths));
       } finally {
         this.pullTouchedPaths = null;
         this.applyingRemoteChanges = false;
@@ -630,10 +607,6 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
       this.data.serverStatus = "online";
       this.data.remoteUpdatedAt = manifest.updatedAt || this.data.remoteUpdatedAt;
-      // Remember a deferred active-file deletion (persisted, so a reload does not
-      // strand it) so an active-leaf-change / startup can finish it promptly,
-      // instead of busy-re-polling every interval.
-      this.data.deferredDeletePath = deferredActiveDeletion ? activePath : null;
       this.data.lastSync = new Date().toLocaleString();
       this.pushQueueItem("pull", "Remote vault", pulledBytes, "done");
       await this.scanVault();
