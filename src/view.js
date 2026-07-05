@@ -21,7 +21,7 @@ class SyncDeckView extends ItemView {
   }
 
   getDisplayText() {
-    return "SyncDeck";
+    return "Sync Deck";
   }
 
   getIcon() {
@@ -50,7 +50,7 @@ class SyncDeckView extends ItemView {
 
     const toolbar = createElement("div", "sd-toolbar");
     const title = createElement("div", "sd-toolbar-title");
-    title.append(createElement("h2", "", "SyncDeck"));
+    title.append(createElement("h2", "", "Sync Deck"));
     title.append(this.statusPill(data.serverStatus === "online" ? "API online" : "API offline", data.serverStatus === "online" ? "good" : "muted"));
     if (data.signedIn) title.append(this.avatar(data.user, "sd-profile-avatar"));
 
@@ -208,7 +208,7 @@ class SyncDeckView extends ItemView {
 
   confirmRemoveMember(member) {
     const name = member.name || member.email;
-    const confirmed = window.confirm(`Remove ${name} from this vault?\n\nThey will lose sync access and the vault will disappear from their SyncDeck. They can rejoin only with a new invite.`);
+    const confirmed = window.confirm(`Remove ${name} from this vault?\n\nThey will lose sync access and the vault will disappear from their Sync Deck. They can rejoin only with a new invite.`);
     if (confirmed) this.plugin.removeVaultMember(member.email);
   }
 

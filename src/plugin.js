@@ -135,10 +135,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.addSettingTab(new SyncDeckSettingTab(this.app, this));
     this.registerVaultEvents();
 
-    this.addRibbonIcon(ICON_ID, "Open SyncDeck", () => this.activateView());
+    this.addRibbonIcon(ICON_ID, "Open Sync Deck", () => this.activateView());
     this.addCommand({
       id: "open-sync-deck",
-      name: "Open SyncDeck",
+      name: "Open Sync Deck",
       callback: () => this.activateView(),
     });
     this.startRemotePolling();
