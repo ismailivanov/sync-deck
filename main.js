@@ -431,6 +431,10 @@ function base64ToArrayBuffer(value) {
   return bytes.buffer;
 }
 
+function isVaultAccessError(error) {
+  return error && error.status === 403 && /vault access denied/i.test(error.message || "");
+}
+
 class InviteCodeModal extends Modal {
   constructor(app) {
     super(app);
@@ -646,6 +650,16 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.serverStatus = "online";
   }
 
+  async markVaultAccessDenied(action) {
+    this.data.serverStatus = "online";
+    this.data.syncEnabled = false;
+    this.data.syncProgress = 0;
+    this.data.vaultStats.syncedFiles = 0;
+    this.pushQueueItem(action, "Vault access", 0, "failed: join or sign in again");
+    await this.savePluginData();
+    new Notice("This Google account cannot access this vault. Use Join with an invite code, or sign out and sign in as the owner.");
+  }
+
   compactQueue(queue) {
     let keptScan = false;
     return queue.filter((item) => {
@@ -709,7 +723,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.vaultStats = stats;
     this.data.recentFiles = recentFiles.slice(0, 8);
     this.data.storageUsedMb = Math.round(stats.syncableBytes / 1024 / 1024);
-    this.data.syncProgress = stats.syncableFiles ? 100 : 0;
+    this.data.syncProgress = options.upload ? 0 : 100;
     this.data.lastSync = new Date().toLocaleString();
     this.pushQueueItem("scan", "Full vault", stats.syncableBytes, "done");
     try {
@@ -717,6 +731,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       await this.pushScanSummary();
       if (options.upload) await this.uploadVaultFiles(syncableFiles);
     } catch (error) {
+      if (isVaultAccessError(error)) {
+        await this.markVaultAccessDenied("sync");
+        return false;
+      }
       this.data.serverStatus = "offline";
       this.pushQueueItem("sync", "Server sync", 0, `failed: ${error.message}`);
       new Notice(`Server sync failed: ${error.message}`);
@@ -816,6 +834,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       await this.scanVault();
       new Notice(pulledFiles ? `Pulled ${pulledFiles} files.` : "Vault already up to date.");
     } catch (error) {
+      if (isVaultAccessError(error)) {
+        await this.markVaultAccessDenied("pull");
+        return;
+      }
       this.data.serverStatus = "offline";
       this.pushQueueItem("pull", "Remote vault", 0, `failed: ${error.message}`);
       await this.savePluginData();
@@ -954,6 +976,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (navigator.clipboard) await navigator.clipboard.writeText(invite.code).catch(() => {});
       new Notice(`Invite code copied: ${invite.code}`);
     } catch (error) {
+      if (isVaultAccessError(error)) {
+        await this.markVaultAccessDenied("invite");
+        return;
+      }
       new Notice(`Could not create invite: ${error.message}`);
     }
   }
