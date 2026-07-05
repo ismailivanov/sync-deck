@@ -376,6 +376,17 @@
   transition: none;
 }
 
+.sd-editor-sel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: 2px;
+  background: var(--sd-cursor-color, #8b5cf6);
+  opacity: 0.22;
+  pointer-events: none;
+  will-change: transform;
+}
+
 .sd-editor-caret {
   position: absolute;
   inset: 0;

@@ -529,12 +529,22 @@ class EditorPresence {
   }
 
   readCursor() {
+    const empty = { line: 0, ch: 0, fromLine: 0, fromCh: 0, toLine: 0, toCh: 0, editing: false };
     try {
-      const c = this.editor && this.editor.getCursor ? this.editor.getCursor() : null;
+      const editor = this.editor;
+      if (!editor || !editor.getCursor) return empty;
+      const head = editor.getCursor("head") || { line: 0, ch: 0 };
+      const from = editor.getCursor("from") || head;
+      const to = editor.getCursor("to") || head;
       const editing = this.currentView && this.currentView.getMode ? this.currentView.getMode() === "source" : true;
-      return { line: (c && c.line) || 0, ch: (c && c.ch) || 0, editing };
+      return {
+        line: head.line || 0, ch: head.ch || 0,
+        fromLine: from.line || 0, fromCh: from.ch || 0,
+        toLine: to.line || 0, toCh: to.ch || 0,
+        editing,
+      };
     } catch (error) {
-      return { line: 0, ch: 0, editing: false };
+      return empty;
     }
   }
 
@@ -553,7 +563,11 @@ class EditorPresence {
     try {
       const result = await this.plugin.api(`/vaults/${encodeURIComponent(this.plugin.data.vaultId)}/files/presence`, {
         method: "POST",
-        body: { path, line: cur.line, ch: cur.ch, editing: cur.editing, color },
+        body: {
+          path, color, editing: cur.editing,
+          line: cur.line, ch: cur.ch,
+          fromLine: cur.fromLine, fromCh: cur.fromCh, toLine: cur.toLine, toCh: cur.toCh,
+        },
       });
       if (!this.disposed && this.currentPath === path) this.applyPeers(result && result.peers);
     } catch (error) {
@@ -588,11 +602,15 @@ class EditorPresence {
       entry.editing = !!p.editing;
       entry.line = p.line;
       entry.ch = p.ch;
+      const fin = (v) => (Number.isFinite(v) ? v : 0);
+      entry.from = { line: fin(p.fromLine), ch: fin(p.fromCh) };
+      entry.to = { line: fin(p.toLine), ch: fin(p.toCh) };
     });
     // The server returns all active peers, so anyone absent has left -> remove.
     this.peers.forEach((entry, email) => {
       if (seen.has(email)) return;
       if (entry.el && entry.el.parentElement) entry.el.remove();
+      (entry.selEls || []).forEach((el) => el.parentElement && el.remove());
       this.peers.delete(email);
     });
     this.renderStatus();
@@ -613,12 +631,94 @@ class EditorPresence {
     if (!this.layer || !this.editor || this.peers.size === 0) return;
     const cm = this.editor.cm;
     const scrollRect = cm && cm.scrollDOM ? cm.scrollDOM.getBoundingClientRect() : null;
+    if (!scrollRect) return;
     this.peers.forEach((entry) => {
       const px = this.coordsFor(entry);
-      const visible = !!(px && scrollRect
+      const visible = !!(px
         && px.top >= scrollRect.top - 2 && px.top + px.h <= scrollRect.bottom + 2
         && px.left >= scrollRect.left - 2 && px.left <= scrollRect.right + 2);
       this.drawCaret(entry, px, visible);
+      this.drawSelection(entry, scrollRect);
+    });
+  }
+
+  // Per-line highlight rectangles for a peer's selection, clipped to the viewport.
+  // Correct for non-wrapped lines; a heavily wrapped line is an approximate box.
+  selectionRects(entry, scrollRect) {
+    const out = [];
+    const from = entry.from;
+    const to = entry.to;
+    if (!from || !to || (from.line === to.line && from.ch === to.ch)) return out;
+    const editor = this.editor;
+    const cm = editor.cm;
+    if (!cm || typeof cm.coordsAtPos !== "function" || !editor.posToOffset) return out;
+
+    // Clamp iteration to the VISIBLE line range up front, so coordsAtPos runs only
+    // for on-screen lines — not the whole selection — keeping this cheap and
+    // jank-free even for a huge selection scrolled mostly out of view.
+    let startLine = from.line;
+    let endLine = to.line;
+    try {
+      const x = scrollRect.left + 4;
+      const topOff = typeof cm.posAtCoords === "function" ? cm.posAtCoords({ x, y: scrollRect.top + 2 }) : null;
+      const botOff = typeof cm.posAtCoords === "function" ? cm.posAtCoords({ x, y: scrollRect.bottom - 2 }) : null;
+      if (topOff != null && editor.offsetToPos) startLine = Math.max(startLine, editor.offsetToPos(topOff).line);
+      if (botOff != null && editor.offsetToPos) endLine = Math.min(endLine, editor.offsetToPos(botOff).line);
+    } catch (error) { /* fall back to the full range, still bounded by MAX_LINES */ }
+
+    const MAX_LINES = 200;
+    for (let line = startLine; line <= endLine && (line - startLine) < MAX_LINES; line++) {
+      let lineText;
+      try { lineText = editor.getLine(line); } catch (error) { continue; }
+      if (lineText == null) continue;
+      const sCh = line === from.line ? from.ch : 0;
+      const eCh = line === to.line ? to.ch : lineText.length;
+      let a;
+      let b;
+      try {
+        const sOff = editor.posToOffset({ line, ch: sCh });
+        const eOff = editor.posToOffset({ line, ch: eCh });
+        if (sOff == null || eOff == null) continue;
+        a = cm.coordsAtPos(sOff);
+        b = cm.coordsAtPos(Math.max(sOff, eOff));
+      } catch (error) { continue; }
+      if (!a || !b) continue;
+
+      const top = Math.min(a.top, b.top);
+      const bottom = Math.max(a.bottom, b.bottom);
+      if (top > scrollRect.bottom + 2) break; // past the viewport; later lines are only lower
+      if (bottom < scrollRect.top - 2) continue; // above the viewport
+      let width = b.left - a.left;
+      if (line !== to.line) width = Math.max(width, scrollRect.right - a.left - 8); // spans to EOL
+      if (width < 4) width = 6; // empty / single-char sliver
+      out.push({ left: a.left, top, width, height: Math.max(12, bottom - top) });
+    }
+    return out;
+  }
+
+  drawSelection(entry, scrollRect) {
+    const rects = this.selectionRects(entry, scrollRect);
+    entry.selEls = entry.selEls || [];
+    while (entry.selEls.length < rects.length) {
+      const el = document.createElement("div");
+      el.className = "sd-editor-sel";
+      this.layer.append(el);
+      entry.selEls.push(el);
+    }
+    // Reclaim surplus divs (with a little hysteresis) so a one-time huge selection
+    // does not leave hundreds of hidden nodes for the peer's whole session.
+    while (entry.selEls.length > rects.length + 8) {
+      const el = entry.selEls.pop();
+      if (el && el.parentElement) el.remove();
+    }
+    entry.selEls.forEach((el, i) => {
+      if (i >= rects.length) { el.style.display = "none"; return; }
+      const r = rects[i];
+      el.style.setProperty("--sd-cursor-color", entry.color || "#8b5cf6");
+      el.style.transform = `translate(${r.left.toFixed(1)}px, ${r.top.toFixed(1)}px)`;
+      el.style.width = `${r.width.toFixed(1)}px`;
+      el.style.height = `${r.height.toFixed(1)}px`;
+      el.style.display = "";
     });
   }
 
