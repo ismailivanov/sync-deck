@@ -367,6 +367,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     const incremental = !!options.incremental;
     const previous = this.uploadedSignatures || {};
     const nextSignatures = {};
+    // Paths that fired a local vault event since the last sync must upload even
+    // if their signature looks unchanged. Snapshot so events during this run are
+    // kept for the next sync rather than dropped.
+    const dirty = new Set(this.dirtyUploadPaths || []);
 
     let syncedFiles = 0;
     let syncedBytes = 0;
@@ -376,7 +380,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       const signature = `${file.stat.mtime || 0}:${file.stat.size || 0}`;
       paths.push(file.path);
       nextSignatures[file.path] = signature;
-      if (incremental && previous[file.path] === signature) continue;
+      if (incremental && previous[file.path] === signature && !dirty.has(file.path)) continue;
 
       const contentBase64 = arrayBufferToBase64(await this.app.vault.readBinary(file));
       await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
@@ -398,6 +402,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       syncedBytes += file.stat.size || 0;
     }
     this.uploadedSignatures = nextSignatures;
+    if (this.dirtyUploadPaths) dirty.forEach((path) => this.dirtyUploadPaths.delete(path));
 
     await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/prune`, {
       method: "POST",
@@ -478,6 +483,15 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (localFile instanceof TFile) await this.app.vault.modifyBinary(localFile, content);
           else await this.app.vault.createBinary(remoteFile.path, content);
 
+          // Record the pulled file's post-write signature so the next incremental
+          // upload treats it as already-synced instead of echoing it back to the
+          // server with a bumped local mtime (which would ping-pong between devices).
+          const writtenFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
+          if (writtenFile instanceof TFile) {
+            this.uploadedSignatures = this.uploadedSignatures || {};
+            this.uploadedSignatures[remoteFile.path] = `${writtenFile.stat.mtime || 0}:${writtenFile.stat.size || 0}`;
+          }
+
           pulledFiles += 1;
           pulledBytes += remoteFile.size || 0;
         }
@@ -526,6 +540,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (!this.data.syncEnabled) return;
     const path = file && file.path ? file.path : oldPath;
     if (!path || isIgnoredPath(path)) return;
+
+    // A locally-originated change is always uploaded on the next sync, even if
+    // its mtime/size signature happens to match the cache (incremental guard).
+    this.dirtyUploadPaths = this.dirtyUploadPaths || new Set();
+    this.dirtyUploadPaths.add(path);
 
     const size = file instanceof TFile ? file.stat.size || 0 : 0;
     if (size > MAX_SYNC_FILE_SIZE) {
