@@ -1,4 +1,4 @@
-const { MarkdownView, Modal, Notice, Plugin, TFile, addIcon } = require("obsidian");
+const { MarkdownView, Modal, Notice, Plugin, TFile, TFolder, addIcon } = require("obsidian");
 const {
   DEFAULT_DATA,
   DEMO_MEMBER_EMAILS,
@@ -791,6 +791,18 @@ module.exports = class SyncDeckPlugin extends Plugin {
         // (b) the user has locally re-created/edited and not yet uploaded — either
         // would destroy content the user did not delete.
         const remotePathsLower = new Set(Array.from(remotePaths, (p) => p.toLowerCase()));
+        // Ancestor folders of files we trash, so we can remove any that a remote
+        // folder-deletion left empty (folders aren't in the manifest).
+        const emptiedFolders = new Set();
+        const recordAncestorFolders = (filePath) => {
+          const parts = filePath.split("/");
+          parts.pop();
+          let cur = "";
+          for (const part of parts) {
+            cur = cur ? `${cur}/${part}` : part;
+            emptiedFolders.add(cur);
+          }
+        };
         for (const file of this.app.vault.getFiles()) {
           if (isIgnoredPath(file.path)) continue;
           if (remotePaths.has(file.path) || !known.has(file.path)) continue;
@@ -798,12 +810,32 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (dirty.has(file.path)) continue;
           try {
             this.pullTouchedPaths.add(file.path);
+            recordAncestorFolders(file.path);
             await this.app.vault.trash(file, false);
             if (this.uploadedSignatures) delete this.uploadedSignatures[file.path];
             if (this.data.syncedHashes) delete this.data.syncedHashes[file.path];
             trashedFiles += 1;
           } catch (error) {
             // ignore individual delete failures; a later pull retries
+          }
+        }
+        // Deleting a folder elsewhere reaches us as file deletions; the now-empty
+        // folder would otherwise linger. Remove folders that the trashes above
+        // left genuinely empty, deepest-first so nested empties collapse. A folder
+        // that still holds a kept file has children and is skipped.
+        const foldersDeepFirst = Array.from(emptiedFolders).sort(
+          (a, b) => b.split("/").length - a.split("/").length
+        );
+        for (const folderPath of foldersDeepFirst) {
+          if (!folderPath || folderPath.startsWith(".") || isIgnoredPath(`${folderPath}/`)) continue;
+          const folder = this.app.vault.getAbstractFileByPath(folderPath);
+          if (folder instanceof TFolder && folder.children.length === 0) {
+            try {
+              this.pullTouchedPaths.add(folderPath);
+              await this.app.vault.trash(folder, false);
+            } catch (error) {
+              // ignore; a later pull retries
+            }
           }
         }
         // New baseline is the server truth (the manifest).
