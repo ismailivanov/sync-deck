@@ -60,15 +60,25 @@
   gap: 14px;
   min-height: 160px;
   min-width: 0;
+  /* Safe default: a panel with no explicit span fills the row instead of
+     collapsing to a single grid track. Variant classes below narrow it. */
+  grid-column: 1 / -1;
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
   padding: 14px;
   background: var(--background-secondary);
 }
 
-.sd-panel:nth-child(1),
-.sd-panel:nth-child(2) {
+/* Top row: sync + members side by side. Recent activity keeps the full-width
+   default and drops to its own row below. Class-based (not :nth-child) so the
+   layout survives adding, removing, or reordering panels. */
+.sd-panel-sync,
+.sd-panel-members {
   grid-column: span 6;
+}
+
+.sd-panel-activity {
+  grid-column: 1 / -1;
 }
 
 .sd-panel-header {
@@ -347,8 +357,9 @@
   }
 
   .sd-panel,
-  .sd-panel:nth-child(1),
-  .sd-panel:nth-child(2) {
+  .sd-panel-sync,
+  .sd-panel-members,
+  .sd-panel-activity {
     grid-column: 1 / -1;
   }
 }

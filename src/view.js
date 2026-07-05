@@ -76,7 +76,7 @@ class SyncDeckView extends ItemView {
   renderSyncPanel() {
     const data = this.plugin.data;
     const stats = data.vaultStats;
-    const panel = this.panel("Vault Sync", "cloud");
+    const panel = this.panel("Vault Sync", "cloud", "sd-panel-sync");
     const hasSyncedFiles = (stats.syncedFiles || 0) > 0;
     const progressLabel = data.syncEnabled || hasSyncedFiles ? percent(data.syncProgress) : "Ready";
     const progressWidth = data.syncEnabled || hasSyncedFiles ? percent(data.syncProgress) : "0%";
@@ -117,7 +117,7 @@ class SyncDeckView extends ItemView {
   }
 
   renderActivityPanel() {
-    const panel = this.panel("Recent Activity", "radio");
+    const panel = this.panel("Recent Activity", "radio", "sd-panel-activity");
     const list = createElement("div", "sd-activity-list");
     const queue = this.plugin.data.syncQueue || [];
 
@@ -145,7 +145,7 @@ class SyncDeckView extends ItemView {
 
   renderMembersPanel() {
     const data = this.plugin.data;
-    const panel = this.panel("Vault Members", "users");
+    const panel = this.panel("Vault Members", "users", "sd-panel-members");
 
     if (!data.signedIn) {
       const empty = createElement("div", "sd-empty-state");
@@ -212,8 +212,8 @@ class SyncDeckView extends ItemView {
     if (confirmed) this.plugin.removeVaultMember(member.email);
   }
 
-  panel(title, icon) {
-    const panel = createElement("section", "sd-panel");
+  panel(title, icon, variant = "") {
+    const panel = createElement("section", `sd-panel ${variant}`.trim());
     const header = createElement("div", "sd-panel-header");
     header.append(createElement("h3", "", title), iconBadge(icon, title));
     panel.append(header);
