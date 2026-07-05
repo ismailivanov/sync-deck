@@ -1,0 +1,501 @@
+const { Notice, Plugin, TFile, addIcon } = require("obsidian");
+const {
+  DEFAULT_DATA,
+  DEMO_MEMBER_EMAILS,
+  ICON_ID,
+  ICON_SVG,
+  MAX_SYNC_FILE_SIZE,
+  VIEW_TYPE,
+  clone,
+  isIgnoredPath,
+  isMarkdownPath,
+  uid,
+} = require("./helpers");
+const { SyncDeskView } = require("./view");
+const { SyncDeskSettingTab } = require("./settings-tab");
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(value) {
+  if (typeof Buffer !== "undefined") {
+    const buffer = Buffer.from(value, "base64");
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  }
+
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+module.exports = class SyncDeskPlugin extends Plugin {
+  async onload() {
+    this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
+
+    addIcon(ICON_ID, ICON_SVG);
+    this.registerView(VIEW_TYPE, (leaf) => new SyncDeskView(leaf, this));
+    this.addSettingTab(new SyncDeskSettingTab(this.app, this));
+    this.registerVaultEvents();
+
+    this.addRibbonIcon(ICON_ID, "Open Sync Desk", () => this.activateView());
+    this.addCommand({
+      id: "open-sync-desk",
+      name: "Open Sync Desk",
+      callback: () => this.activateView(),
+    });
+  }
+
+  onunload() {
+    if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
+    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  async activateView() {
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    const leaf = leaves[0] || this.app.workspace.getLeaf(true);
+    await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  async savePluginData() {
+    await this.saveData(this.data);
+    this.refreshViews();
+  }
+
+  refreshViews() {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => leaf.view.render());
+  }
+
+  normalizeData(data) {
+    data.user = Object.assign(clone(DEFAULT_DATA.user), data.user || {});
+    data.serverUrl = data.serverUrl || DEFAULT_DATA.serverUrl;
+    data.authToken = data.authToken || "";
+    data.serverStatus = data.serverStatus || "offline";
+    data.vaultStats = Object.assign(clone(DEFAULT_DATA.vaultStats), data.vaultStats || {});
+    data.members = Array.isArray(data.members)
+      ? data.members.filter((member) => member && !DEMO_MEMBER_EMAILS.has(member.email))
+      : clone(DEFAULT_DATA.members);
+    data.activity = Array.isArray(data.activity) ? data.activity : clone(DEFAULT_DATA.activity);
+    data.deviceId = data.deviceId || uid("device");
+    data.vaultId = data.vaultId || uid("vault");
+    data.syncQueue = this.compactQueue(Array.isArray(data.syncQueue) ? data.syncQueue : []);
+    data.recentFiles = Array.isArray(data.recentFiles) ? data.recentFiles.slice(0, 20) : [];
+    if (data.signedIn && data.user.email && !DEMO_MEMBER_EMAILS.has(data.user.email)) {
+      const current = {
+        name: data.user.name || data.user.email,
+        email: data.user.email,
+        role: data.role || data.user.role || "User",
+        color: data.user.color || "#8b5cf6",
+        picture: data.user.picture || "",
+        status: "online",
+      };
+      const index = data.members.findIndex((member) => member.email === current.email);
+      if (index >= 0) data.members[index] = Object.assign({}, data.members[index], current);
+      else data.members.unshift(current);
+    }
+    return data;
+  }
+
+  upsertCurrentUserMember() {
+    if (!this.data.user.email) return;
+
+    const current = {
+      name: this.data.user.name || this.data.user.email,
+      email: this.data.user.email,
+      role: this.data.role || this.data.user.role || "User",
+      color: this.data.user.color || "#8b5cf6",
+      picture: this.data.user.picture || "",
+      status: "online",
+    };
+    const index = this.data.members.findIndex((member) => member.email === current.email);
+    if (index >= 0) this.data.members[index] = Object.assign({}, this.data.members[index], current);
+    else this.data.members.unshift(current);
+  }
+
+  async api(path, options = {}) {
+    const baseUrl = String(this.data.serverUrl || DEFAULT_DATA.serverUrl).replace(/\/+$/, "");
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: options.method || "GET",
+      headers: {
+        "content-type": "application/json",
+        ...(this.data.authToken ? { authorization: `Bearer ${this.data.authToken}` } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    return body;
+  }
+
+  async waitForGoogleSession(state) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 120000) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const session = await this.api(`/auth/google/session/${encodeURIComponent(state)}`);
+      if (session.status === "complete") return session;
+      if (session.status === "error") throw new Error(session.error || "Google sign in failed");
+    }
+    throw new Error("Google sign in timed out");
+  }
+
+  async pingServer() {
+    await this.api("/health");
+    this.data.serverStatus = "online";
+    await this.savePluginData();
+    return true;
+  }
+
+  async registerVault() {
+    if (!this.data.authToken) return;
+    await this.api("/vaults/register", {
+      method: "POST",
+      body: {
+        vaultId: this.data.vaultId,
+        deviceId: this.data.deviceId,
+        workspace: this.data.workspace,
+        stats: this.data.vaultStats,
+      },
+    });
+  }
+
+  async pushScanSummary() {
+    if (!this.data.authToken) return;
+    await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/scan`, {
+      method: "POST",
+      body: {
+        stats: this.data.vaultStats,
+        queueLength: this.data.syncQueue.length,
+      },
+    });
+    this.data.serverStatus = "online";
+  }
+
+  compactQueue(queue) {
+    let keptScan = false;
+    return queue.filter((item) => {
+      if (item && item.action === "scan" && item.path === "Full vault") {
+        if (keptScan) return false;
+        keptScan = true;
+      }
+      return item && item.path;
+    }).slice(0, 20);
+  }
+
+  registerVaultEvents() {
+    this.registerEvent(this.app.vault.on("create", (file) => this.handleVaultEvent("create", file)));
+    this.registerEvent(this.app.vault.on("modify", (file) => this.handleVaultEvent("modify", file)));
+    this.registerEvent(this.app.vault.on("delete", (file) => this.handleVaultEvent("delete", file)));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultEvent("rename", file, oldPath)));
+  }
+
+  async isTaskDeckFile(file) {
+    if (!(file instanceof TFile) || !isMarkdownPath(file.path)) return false;
+    const text = await this.app.vault.cachedRead(file);
+    return text.includes("kanban-card-id:") || text.includes("task-deck-board: true") || text.includes("kanban-board-id:");
+  }
+
+  async scanVault(options = {}) {
+    const stats = clone(DEFAULT_DATA.vaultStats);
+    const recentFiles = [];
+    const syncableFiles = [];
+    const files = this.app.vault.getFiles();
+
+    for (const file of files) {
+      const size = file.stat.size || 0;
+      stats.totalFiles += 1;
+      stats.totalBytes += size;
+
+      if (isIgnoredPath(file.path)) {
+        stats.ignoredFiles += 1;
+        continue;
+      }
+      if (size > MAX_SYNC_FILE_SIZE) {
+        stats.oversizedFiles += 1;
+        continue;
+      }
+
+      stats.syncableFiles += 1;
+      stats.syncableBytes += size;
+      syncableFiles.push(file);
+      if (isMarkdownPath(file.path)) stats.markdownFiles += 1;
+      else stats.binaryFiles += 1;
+      if (await this.isTaskDeckFile(file)) stats.taskDeckFiles += 1;
+
+      recentFiles.push({
+        path: file.path,
+        size,
+        mtime: file.stat.mtime || 0,
+        type: isMarkdownPath(file.path) ? "markdown" : "file",
+      });
+    }
+
+    recentFiles.sort((a, b) => b.mtime - a.mtime);
+    this.data.vaultStats = stats;
+    this.data.recentFiles = recentFiles.slice(0, 8);
+    this.data.storageUsedMb = Math.round(stats.syncableBytes / 1024 / 1024);
+    this.data.syncProgress = stats.syncableFiles ? 100 : 0;
+    this.data.lastSync = new Date().toLocaleString();
+    this.pushQueueItem("scan", "Full vault", stats.syncableBytes, "done");
+    try {
+      await this.registerVault();
+      await this.pushScanSummary();
+      if (options.upload) await this.uploadVaultFiles(syncableFiles);
+    } catch (error) {
+      this.data.serverStatus = "offline";
+      new Notice(`Server sync failed: ${error.message}`);
+    }
+    await this.savePluginData();
+  }
+
+  async uploadVaultFiles(files) {
+    if (!this.data.authToken) return;
+
+    let syncedFiles = 0;
+    let syncedBytes = 0;
+    const paths = [];
+
+    for (const file of files) {
+      const contentBase64 = arrayBufferToBase64(await this.app.vault.readBinary(file));
+      await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
+        method: "POST",
+        body: {
+          deviceId: this.data.deviceId,
+          files: [{
+            path: file.path,
+            size: file.stat.size || 0,
+            mtime: file.stat.mtime || 0,
+            ctime: file.stat.ctime || 0,
+            type: isMarkdownPath(file.path) ? "markdown" : "file",
+            contentBase64,
+          }],
+        },
+      });
+
+      syncedFiles += 1;
+      syncedBytes += file.stat.size || 0;
+      paths.push(file.path);
+    }
+
+    await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/prune`, {
+      method: "POST",
+      body: { paths },
+    });
+
+    this.data.vaultStats.syncedFiles = syncedFiles;
+    this.data.vaultStats.syncedBytes = syncedBytes;
+    this.data.syncProgress = files.length ? Math.round((syncedFiles / files.length) * 100) : 100;
+    this.data.serverStatus = "online";
+    this.data.syncQueue = this.data.syncQueue.filter((item) => !(item.status === "pending" && paths.includes(item.path)));
+    this.pushQueueItem("upload", "Vault files", syncedBytes, "done");
+    await this.pushScanSummary();
+  }
+
+  async ensureParentFolder(filePath) {
+    const parts = filePath.split("/").filter(Boolean);
+    parts.pop();
+
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);
+    }
+  }
+
+  async pullLatest() {
+    if (!this.data.signedIn) {
+      new Notice("Sign in first.");
+      return;
+    }
+
+    try {
+      await this.registerVault();
+      const manifest = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      let pulledFiles = 0;
+      let pulledBytes = 0;
+
+      for (const remoteFile of manifest.files || []) {
+        if (!remoteFile.path || isIgnoredPath(remoteFile.path)) continue;
+
+        const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
+        if (localFile instanceof TFile && (localFile.stat.mtime || 0) >= (remoteFile.mtime || 0)) continue;
+
+        const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
+        const content = base64ToArrayBuffer(remote.contentBase64);
+        await this.ensureParentFolder(remoteFile.path);
+
+        if (localFile instanceof TFile) await this.app.vault.modifyBinary(localFile, content);
+        else await this.app.vault.createBinary(remoteFile.path, content);
+
+        pulledFiles += 1;
+        pulledBytes += remoteFile.size || 0;
+      }
+
+      this.data.serverStatus = "online";
+      this.data.lastSync = new Date().toLocaleString();
+      this.pushQueueItem("pull", "Remote vault", pulledBytes, "done");
+      await this.scanVault();
+      new Notice(pulledFiles ? `Pulled ${pulledFiles} files.` : "Vault already up to date.");
+    } catch (error) {
+      this.data.serverStatus = "offline";
+      await this.savePluginData();
+      new Notice(`Pull failed: ${error.message}`);
+    }
+  }
+
+  pushQueueItem(action, path, size = 0, status = "pending", oldPath = "") {
+    this.data.syncQueue = this.data.syncQueue.filter((item) => {
+      if (action === "scan" && path === "Full vault") return !(item.action === "scan" && item.path === "Full vault");
+      return !(item.action === action && item.path === path && item.status === status);
+    });
+    this.data.syncQueue.unshift({
+      action,
+      path,
+      oldPath,
+      size,
+      status,
+      time: new Date().toLocaleTimeString(),
+    });
+    this.data.syncQueue = this.compactQueue(this.data.syncQueue);
+  }
+
+  async handleVaultEvent(action, file, oldPath = "") {
+    if (!this.data.syncEnabled) return;
+    const path = file && file.path ? file.path : oldPath;
+    if (!path || isIgnoredPath(path)) return;
+
+    const size = file instanceof TFile ? file.stat.size || 0 : 0;
+    if (size > MAX_SYNC_FILE_SIZE) {
+      this.pushQueueItem("skip", path, size, "too large", oldPath);
+    } else {
+      this.pushQueueItem(action, path, size, "pending", oldPath);
+    }
+    await this.savePluginData();
+    this.scheduleAutoSync();
+  }
+
+  scheduleAutoSync() {
+    if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
+    this.autoSyncTimer = window.setTimeout(async () => {
+      this.autoSyncTimer = null;
+      if (!this.data.signedIn || !this.data.syncEnabled) return;
+      if (this.autoSyncRunning) return this.scheduleAutoSync();
+
+      this.autoSyncRunning = true;
+      try {
+        await this.scanVault({ upload: true });
+      } finally {
+        this.autoSyncRunning = false;
+      }
+    }, 2000);
+  }
+
+  async signIn() {
+    try {
+      const start = await this.api("/auth/google/start");
+      if (!start.authUrl || !start.state) throw new Error("Google sign in did not start");
+
+      window.open(start.authUrl);
+      new Notice("Finish Google sign in in your browser.");
+
+      const result = await this.waitForGoogleSession(start.state);
+      this.data.authToken = result.token;
+      this.data.user = Object.assign(this.data.user, result.user || {});
+      this.data.workspace = this.data.user.workspace || this.data.workspace;
+      this.data.role = this.data.user.role || this.data.role;
+      this.data.signedIn = true;
+      this.data.serverStatus = "online";
+      this.upsertCurrentUserMember();
+      await this.registerVault();
+      await this.savePluginData();
+      new Notice("Signed in with Google.");
+    } catch (error) {
+      this.data.serverStatus = "offline";
+      await this.savePluginData();
+      new Notice(`Could not sign in: ${error.message}`);
+    }
+  }
+
+  async signOut() {
+    this.data.signedIn = false;
+    this.data.syncEnabled = false;
+    this.data.authToken = "";
+    await this.savePluginData();
+    new Notice("Signed out.");
+  }
+
+  async toggleSync() {
+    if (!this.data.signedIn) {
+      new Notice("Sign in first.");
+      return;
+    }
+
+    this.data.syncEnabled = !this.data.syncEnabled;
+    if (this.data.syncEnabled) {
+      await this.scanVault({ upload: true });
+      new Notice("Vault sync started.");
+    } else {
+      await this.savePluginData();
+      new Notice("Vault sync paused.");
+    }
+  }
+
+  async finishScan() {
+    if (!this.data.signedIn) {
+      new Notice("Sign in first.");
+      return;
+    }
+
+    await this.scanVault({ upload: this.data.syncEnabled });
+    new Notice(this.data.syncEnabled ? "Vault sync complete." : "Vault scan complete.");
+  }
+
+  async createInvite() {
+    if (!this.data.signedIn) {
+      new Notice("Sign in first.");
+      return;
+    }
+
+    try {
+      await this.registerVault();
+      const invite = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/invites`, { method: "POST" });
+      if (navigator.clipboard) await navigator.clipboard.writeText(invite.code).catch(() => {});
+      new Notice(`Invite code copied: ${invite.code}`);
+    } catch (error) {
+      new Notice(`Could not create invite: ${error.message}`);
+    }
+  }
+
+  async joinInvite() {
+    if (!this.data.signedIn) {
+      new Notice("Sign in first.");
+      return;
+    }
+
+    const code = window.prompt("Invite code");
+    if (!code) return;
+
+    try {
+      const result = await this.api(`/invites/${encodeURIComponent(code.trim())}/accept`, { method: "POST" });
+      this.data.vaultId = result.vaultId;
+      this.data.workspace = result.workspace || this.data.workspace;
+      this.data.role = result.role || "User";
+      this.data.members = Array.isArray(result.members) ? result.members : this.data.members;
+      await this.savePluginData();
+      await this.pullLatest();
+      new Notice(`Joined ${this.data.workspace}.`);
+    } catch (error) {
+      new Notice(`Could not join invite: ${error.message}`);
+    }
+  }
+
+};

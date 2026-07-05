@@ -1,0 +1,6 @@
+data.json
+server/data.json
+server/server.log
+server/server.pid
+server/storage/
+.DS_Store
