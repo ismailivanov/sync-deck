@@ -129,6 +129,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
       callback: () => this.activateView(),
     });
     this.startRemotePolling();
+    // A deletion deferred before shutdown (the file was being edited) is not
+    // re-detected by the poll, since remoteUpdatedAt is already current. Finish
+    // it once on startup if the file is no longer the one being edited.
+    if (this.data.deferredDeletePath && this.data.signedIn && this.data.syncEnabled) {
+      this.pullLatest({ silent: true }).catch(() => {});
+    }
   }
 
   onunload() {
@@ -168,6 +174,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.vaultId = data.vaultId || uid("vault");
     data.syncQueue = this.compactQueue(Array.isArray(data.syncQueue) ? data.syncQueue : []);
     data.recentFiles = Array.isArray(data.recentFiles) ? data.recentFiles.slice(0, 20) : [];
+    data.remoteKnownPaths = Array.isArray(data.remoteKnownPaths) ? data.remoteKnownPaths : [];
+    data.remoteKnownVaultId = typeof data.remoteKnownVaultId === "string" ? data.remoteKnownVaultId : "";
+    data.pendingDeletes = Array.isArray(data.pendingDeletes) ? data.pendingDeletes : [];
+    data.deferredDeletePath = typeof data.deferredDeletePath === "string" ? data.deferredDeletePath : null;
     if (data.signedIn && data.user.email && !DEMO_MEMBER_EMAILS.has(data.user.email)) {
       const current = {
         name: data.user.name || data.user.email,
@@ -288,6 +298,15 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("modify", (file) => this.handleVaultEvent("modify", file)));
     this.registerEvent(this.app.vault.on("delete", (file) => this.handleVaultEvent("delete", file)));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleVaultEvent("rename", file, oldPath)));
+    // When the user leaves a file whose remote deletion we deferred, pull once
+    // to finish trashing it (it is no longer the active file).
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => {
+      if (!this.data.deferredDeletePath || !this.data.signedIn || !this.data.syncEnabled) return;
+      const active = this.app.workspace.getActiveFile();
+      if (this.data.deferredDeletePath !== (active ? active.path : null)) {
+        this.pullLatest({ silent: true }).catch(() => {});
+      }
+    }));
   }
 
   async isTaskDeckFile(file) {
@@ -357,6 +376,20 @@ module.exports = class SyncDeckPlugin extends Plugin {
     return true;
   }
 
+  // The set of paths this device believes exist on the server. It is tagged with
+  // the vaultId it was recorded for; if the active vault differs (e.g. after
+  // joining another vault or switching accounts) it is treated as empty, so a
+  // stale baseline can never drive a deletion against the new vault's files.
+  getRemoteKnownPaths() {
+    if (this.data.remoteKnownVaultId !== this.data.vaultId) return new Set();
+    return new Set(this.data.remoteKnownPaths || []);
+  }
+
+  setRemoteKnownPaths(paths) {
+    this.data.remoteKnownPaths = Array.isArray(paths) ? paths : Array.from(paths);
+    this.data.remoteKnownVaultId = this.data.vaultId;
+  }
+
   async uploadVaultFiles(files, options = {}) {
     if (!this.data.authToken) return;
 
@@ -404,10 +437,36 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.uploadedSignatures = nextSignatures;
     if (this.dirtyUploadPaths) dirty.forEach((path) => this.dirtyUploadPaths.delete(path));
 
-    await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/prune`, {
-      method: "POST",
-      body: { paths },
-    });
+    // Explicitly delete only the files THIS device intentionally removed: paths
+    // we knew were on the server, that fired a local delete/rename event, and that
+    // are still gone now. This never touches another device's not-yet-synced files
+    // (unlike a full prune), leaves oversized files (still present) alone, and
+    // ignores an atomic-save remove/rewrite blip (no delete event for the path).
+    const known = this.getRemoteKnownPaths();
+    const sameVault = this.data.remoteKnownVaultId === this.data.vaultId;
+    const pending = new Set(sameVault && Array.isArray(this.data.pendingDeletes) ? this.data.pendingDeletes : []);
+    const toDelete = Array.from(known).filter(
+      (path) => pending.has(path) && !this.app.vault.getAbstractFileByPath(path)
+    );
+    if (toDelete.length) {
+      await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/delete`, {
+        method: "POST",
+        body: { paths: toDelete },
+      });
+    }
+    const deletedSet = new Set(toDelete);
+    const nextKnown = new Set(known);
+    paths.forEach((path) => nextKnown.add(path));
+    deletedSet.forEach((path) => nextKnown.delete(path));
+    this.setRemoteKnownPaths(Array.from(nextKnown));
+    // Keep only intents that are still unresolved: path still gone locally and
+    // still believed present on the server. Deleted, reappeared, or never-remote
+    // paths drop out, so the set cannot grow without bound.
+    if (sameVault) {
+      this.data.pendingDeletes = Array.from(pending).filter(
+        (path) => nextKnown.has(path) && !this.app.vault.getAbstractFileByPath(path)
+      );
+    }
 
     this.data.vaultStats.syncedFiles = syncedFiles;
     this.data.vaultStats.syncedBytes = syncedBytes;
@@ -467,15 +526,30 @@ module.exports = class SyncDeckPlugin extends Plugin {
       const manifest = options.manifest || await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
       let pulledFiles = 0;
       let pulledBytes = 0;
+      let trashedFiles = 0;
+      let deferredActiveDeletion = false;
+      // Never overwrite or delete the file the user is actively editing out from
+      // under them; it reconciles on a later pull once they switch away.
+      const activeFile = this.app.workspace.getActiveFile();
+      const activePath = activeFile ? activeFile.path : null;
+      // Snapshot the known-set at entry so a concurrent upload cannot make a
+      // just-added path look like a remote deletion mid-pull.
+      const known = this.getRemoteKnownPaths();
+
+      // Paths this pull writes/trashes. Used to tell our own vault events apart
+      // from a genuine user delete that races the pull (see handleVaultEvent).
+      this.pullTouchedPaths = new Set();
 
       this.applyingRemoteChanges = true;
       try {
         for (const remoteFile of manifest.files || []) {
           if (!remoteFile.path || isIgnoredPath(remoteFile.path)) continue;
+          if (remoteFile.path === activePath) continue;
 
           const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
           if (localFile instanceof TFile && (localFile.stat.mtime || 0) >= (remoteFile.mtime || 0)) continue;
 
+          this.pullTouchedPaths.add(remoteFile.path);
           const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
           const content = base64ToArrayBuffer(remote.contentBase64);
           await this.ensureParentFolder(remoteFile.path);
@@ -495,16 +569,65 @@ module.exports = class SyncDeckPlugin extends Plugin {
           pulledFiles += 1;
           pulledBytes += remoteFile.size || 0;
         }
+
+        // Propagate remote deletions: a file we previously knew on the server but
+        // that is gone from the manifest was deleted elsewhere -> trash ours too.
+        // remoteKnownPaths distinguishes "deleted remotely" from "new locally".
+        const remotePaths = new Set(
+          (manifest.files || [])
+            .filter((file) => file.path && !isIgnoredPath(file.path))
+            .map((file) => file.path)
+        );
+        // Conservative trash: only remove a local file that is genuinely gone
+        // from the server. Skip anything that (a) still exists on the server under
+        // a different case (case-only rename on a case-insensitive filesystem) or
+        // (b) the user has locally re-created/edited and not yet uploaded — either
+        // would destroy content the user did not delete.
+        const remotePathsLower = new Set(Array.from(remotePaths, (p) => p.toLowerCase()));
+        const dirty = this.dirtyUploadPaths || new Set();
+        for (const file of this.app.vault.getFiles()) {
+          if (isIgnoredPath(file.path) || file.path === activePath) continue;
+          if (remotePaths.has(file.path) || !known.has(file.path)) continue;
+          if (remotePathsLower.has(file.path.toLowerCase())) continue;
+          if (dirty.has(file.path)) continue;
+          try {
+            this.pullTouchedPaths.add(file.path);
+            await this.app.vault.trash(file, false);
+            if (this.uploadedSignatures) delete this.uploadedSignatures[file.path];
+            trashedFiles += 1;
+          } catch (error) {
+            // ignore individual delete failures; a later pull retries
+          }
+        }
+        // New baseline is the server truth (manifest). Keep a deferred deletion
+        // of the active file so it still propagates once the user leaves it.
+        const nextKnown = new Set(remotePaths);
+        if (activePath && known.has(activePath) && !remotePaths.has(activePath)) {
+          nextKnown.add(activePath);
+          deferredActiveDeletion = true;
+        }
+        this.setRemoteKnownPaths(Array.from(nextKnown));
       } finally {
+        this.pullTouchedPaths = null;
         this.applyingRemoteChanges = false;
       }
 
       this.data.serverStatus = "online";
       this.data.remoteUpdatedAt = manifest.updatedAt || this.data.remoteUpdatedAt;
+      // Remember a deferred active-file deletion (persisted, so a reload does not
+      // strand it) so an active-leaf-change / startup can finish it promptly,
+      // instead of busy-re-polling every interval.
+      this.data.deferredDeletePath = deferredActiveDeletion ? activePath : null;
       this.data.lastSync = new Date().toLocaleString();
       this.pushQueueItem("pull", "Remote vault", pulledBytes, "done");
       await this.scanVault();
-      if (!options.silent) new Notice(pulledFiles ? `Pulled ${pulledFiles} files.` : "Vault already up to date.");
+      if (!options.silent) {
+        const summary = [
+          pulledFiles ? `Pulled ${pulledFiles} files` : "",
+          trashedFiles ? `removed ${trashedFiles}` : "",
+        ].filter(Boolean).join(", ");
+        new Notice(summary ? `${summary}.` : "Vault already up to date.");
+      }
     } catch (error) {
       if (isVaultAccessError(error)) {
         await this.markVaultAccessDenied("pull");
@@ -536,15 +659,45 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async handleVaultEvent(action, file, oldPath = "") {
-    if (this.applyingRemoteChanges) return;
-    if (!this.data.syncEnabled) return;
     const path = file && file.path ? file.path : oldPath;
+    if (this.applyingRemoteChanges) {
+      // Our own pull fires create/modify/delete events. Ignore those (they are in
+      // pullTouchedPaths), but still handle genuine USER changes racing the pull:
+      const survivor = action !== "delete" && file && file.path ? file.path : null;
+      // Protect a path the user created/renamed-INTO during the pull from the
+      // trash loop, which would otherwise destroy that fresh content.
+      if (survivor && !isIgnoredPath(survivor) && !(this.pullTouchedPaths && this.pullTouchedPaths.has(survivor))) {
+        this.dirtyUploadPaths = this.dirtyUploadPaths || new Set();
+        this.dirtyUploadPaths.add(survivor);
+      }
+      // Capture a user delete/rename so the removal is not silently swallowed.
+      if (action === "delete" || action === "rename") {
+        const gone = action === "rename" ? oldPath : path;
+        if (gone && !isIgnoredPath(gone) && !(this.pullTouchedPaths && this.pullTouchedPaths.has(gone))) {
+          this.data.pendingDeletes = Array.isArray(this.data.pendingDeletes) ? this.data.pendingDeletes : [];
+          if (!this.data.pendingDeletes.includes(gone)) this.data.pendingDeletes.push(gone);
+        }
+      }
+      return;
+    }
+    if (!this.data.syncEnabled) return;
     if (!path || isIgnoredPath(path)) return;
 
     // A locally-originated change is always uploaded on the next sync, even if
     // its mtime/size signature happens to match the cache (incremental guard).
     this.dirtyUploadPaths = this.dirtyUploadPaths || new Set();
     this.dirtyUploadPaths.add(path);
+
+    // Record intentional local removals durably in this.data (survives reload)
+    // so a genuine deletion still propagates after a restart, while a create/modify
+    // for the same path cancels the intent — so an atomic-save remove/rewrite blip
+    // never becomes a deletion.
+    this.data.pendingDeletes = Array.isArray(this.data.pendingDeletes) ? this.data.pendingDeletes : [];
+    const addPendingDelete = (p) => { if (p && !this.data.pendingDeletes.includes(p)) this.data.pendingDeletes.push(p); };
+    const dropPendingDelete = (p) => { this.data.pendingDeletes = this.data.pendingDeletes.filter((x) => x !== p); };
+    if (action === "delete") addPendingDelete(path);
+    else if (action === "rename") { if (oldPath && !isIgnoredPath(oldPath)) addPendingDelete(oldPath); dropPendingDelete(path); }
+    else dropPendingDelete(path); // create/modify => the file exists; cancel any stale delete intent
 
     const size = file instanceof TFile ? file.stat.size || 0 : 0;
     if (size > MAX_SYNC_FILE_SIZE) {
@@ -561,7 +714,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.autoSyncTimer = window.setTimeout(async () => {
       this.autoSyncTimer = null;
       if (!this.data.signedIn || !this.data.syncEnabled) return;
-      if (this.autoSyncRunning) return this.scheduleAutoSync();
+      // Never run an upload while a pull is in flight: both mutate remoteKnownPaths
+      // and an interleave can misread a just-uploaded file as a remote deletion.
+      if (this.autoSyncRunning || this.remotePullRunning) return this.scheduleAutoSync();
 
       this.autoSyncRunning = true;
       try {
