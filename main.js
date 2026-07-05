@@ -1291,24 +1291,6 @@ module.exports = class SyncDeckPlugin extends Plugin {
     await this.pushScanSummary();
   }
 
-  // True if the path is open in a Markdown editor whose buffer differs from disk
-  // (un-flushed keystrokes) — so a pull must not overwrite and discard them.
-  async pathHasUnsavedEditor(path, localFile) {
-    try {
-      const leaves = this.app.workspace.getLeavesOfType("markdown");
-      for (const leaf of leaves) {
-        const view = leaf && leaf.view;
-        if (view instanceof MarkdownView && view.file && view.file.path === path && view.editor && typeof view.editor.getValue === "function") {
-          const disk = await this.app.vault.read(localFile);
-          if (view.editor.getValue() !== disk) return true;
-        }
-      }
-    } catch (error) {
-      // best-effort; on any error fall through to allowing the pull
-    }
-    return false;
-  }
-
   async ensureParentFolder(filePath) {
     const parts = filePath.split("/").filter(Boolean);
     parts.pop();
@@ -1398,14 +1380,16 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (remoteFile.hash) {
             let knownHash = this.data.syncedHashes[remoteFile.path];
             if (knownHash === undefined && localFile instanceof TFile) {
-              knownHash = await sha256Hex(await this.app.vault.readBinary(localFile));
+              try {
+                knownHash = await sha256Hex(await this.app.vault.readBinary(localFile));
+              } catch (error) {
+                // file vanished mid-pull: treat as unknown and just pull it
+                knownHash = undefined;
+              }
               if (knownHash) this.data.syncedHashes[remoteFile.path] = knownHash;
             }
             if (knownHash === remoteFile.hash) continue;
           }
-
-          // Never overwrite a file open in an editor with un-flushed keystrokes.
-          if (localFile instanceof TFile && await this.pathHasUnsavedEditor(remoteFile.path, localFile)) continue;
 
           this.pullTouchedPaths.add(remoteFile.path);
           const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
