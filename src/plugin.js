@@ -15,7 +15,8 @@ const { SyncDeckView } = require("./view");
 const { SyncDeckSettingTab } = require("./settings-tab");
 const { EditorPresence } = require("./editor-presence");
 
-const REMOTE_POLL_INTERVAL_MS = 1500;
+const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
+const REMOTE_POLL_ACTIVE_MS = 400; // fast poll while collaborating on the open file
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -135,8 +136,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   onunload() {
+    this.unloaded = true;
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
-    if (this.remotePollTimer) window.clearInterval(this.remotePollTimer);
+    if (this.remotePollTimer) window.clearTimeout(this.remotePollTimer);
     if (this.editorPresence) this.editorPresence.stop();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
@@ -490,8 +492,20 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   startRemotePolling() {
-    if (this.remotePollTimer) window.clearInterval(this.remotePollTimer);
-    this.remotePollTimer = window.setInterval(() => this.pollRemoteChanges(), REMOTE_POLL_INTERVAL_MS);
+    if (this.remotePollTimer) window.clearTimeout(this.remotePollTimer);
+    const loop = async () => {
+      try {
+        await this.pollRemoteChanges();
+      } catch (error) {
+        // pollRemoteChanges handles its own errors; never let the loop die
+      }
+      if (this.unloaded) return; // do not re-arm after the plugin was unloaded
+      // Poll fast while someone else is on the same file (active collaboration),
+      // relaxed otherwise, so changes feel near-instant without constant load.
+      const collaborating = this.editorPresence && this.editorPresence.peers && this.editorPresence.peers.size > 0;
+      this.remotePollTimer = window.setTimeout(loop, collaborating ? REMOTE_POLL_ACTIVE_MS : REMOTE_POLL_INTERVAL_MS);
+    };
+    this.remotePollTimer = window.setTimeout(loop, REMOTE_POLL_ACTIVE_MS);
   }
 
   async pollRemoteChanges() {
@@ -702,6 +716,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
     this.autoSyncTimer = window.setTimeout(async () => {
       this.autoSyncTimer = null;
+      if (this.unloaded) return;
       if (!this.data.signedIn || !this.data.syncEnabled) return;
       // Never run an upload while a pull is in flight: both mutate remoteKnownPaths
       // and an interleave can misread a just-uploaded file as a remote deletion.
@@ -713,7 +728,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       } finally {
         this.autoSyncRunning = false;
       }
-    }, 600);
+    }, 250);
   }
 
   async signIn() {
