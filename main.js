@@ -391,7 +391,7 @@ module.exports = { SyncDeckSettingTab };
 
   },
   "src/plugin.js": function(module, exports, __require) {
-const { Notice, Plugin, TFile, addIcon } = require("obsidian");
+const { Modal, Notice, Plugin, TFile, addIcon } = require("obsidian");
 const {
   DEFAULT_DATA,
   DEMO_MEMBER_EMAILS,
@@ -429,6 +429,75 @@ function base64ToArrayBuffer(value) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
+}
+
+class InviteCodeModal extends Modal {
+  constructor(app) {
+    super(app);
+    this.resolve = null;
+  }
+
+  openAndWait() {
+    return new Promise((resolve) => {
+      this.resolve = resolve;
+      this.open();
+    });
+  }
+
+  finish(value) {
+    const resolve = this.resolve;
+    this.resolve = null;
+    this.close();
+    if (resolve) resolve(value);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("sd-invite-modal");
+    contentEl.createEl("h2", { text: "Join vault" });
+    contentEl.createEl("p", { text: "Paste the invite code from the vault owner." });
+
+    const input = contentEl.createEl("input", {
+      attr: {
+        type: "text",
+        placeholder: "Invite code",
+        spellcheck: "false",
+      },
+    });
+    input.addClass("sd-code-input");
+
+    const actions = contentEl.createDiv({ cls: "sd-modal-actions" });
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const join = actions.createEl("button", { text: "Join" });
+    join.addClass("mod-cta");
+
+    const submit = () => {
+      const code = input.value.trim().toUpperCase();
+      if (!code) {
+        input.focus();
+        return;
+      }
+      this.finish(code);
+    };
+
+    cancel.addEventListener("click", () => this.finish(""));
+    join.addEventListener("click", submit);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submit();
+      if (event.key === "Escape") this.finish("");
+    });
+    input.addEventListener("input", () => {
+      input.value = input.value.toUpperCase();
+    });
+
+    window.setTimeout(() => input.focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (this.resolve) this.finish("");
+  }
 }
 
 module.exports = class SyncDeckPlugin extends Plugin {
@@ -526,7 +595,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(body.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return body;
   }
 
@@ -645,9 +718,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (options.upload) await this.uploadVaultFiles(syncableFiles);
     } catch (error) {
       this.data.serverStatus = "offline";
+      this.pushQueueItem("sync", "Server sync", 0, `failed: ${error.message}`);
       new Notice(`Server sync failed: ${error.message}`);
+      await this.savePluginData();
+      return false;
     }
     await this.savePluginData();
+    return true;
   }
 
   async uploadVaultFiles(files) {
@@ -740,6 +817,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       new Notice(pulledFiles ? `Pulled ${pulledFiles} files.` : "Vault already up to date.");
     } catch (error) {
       this.data.serverStatus = "offline";
+      this.pushQueueItem("pull", "Remote vault", 0, `failed: ${error.message}`);
       await this.savePluginData();
       new Notice(`Pull failed: ${error.message}`);
     }
@@ -801,14 +879,26 @@ module.exports = class SyncDeckPlugin extends Plugin {
       new Notice("Finish Google sign in in your browser.");
 
       const result = await this.waitForGoogleSession(start.state);
+      const previousEmail = this.data.user.email;
       this.data.authToken = result.token;
       this.data.user = Object.assign(this.data.user, result.user || {});
+      if (previousEmail && previousEmail !== this.data.user.email && !DEMO_MEMBER_EMAILS.has(previousEmail)) {
+        this.data.vaultId = uid("vault");
+        this.data.syncEnabled = false;
+      }
       this.data.workspace = this.data.user.workspace || this.data.workspace;
       this.data.role = this.data.user.role || this.data.role;
       this.data.signedIn = true;
       this.data.serverStatus = "online";
       this.upsertCurrentUserMember();
-      await this.registerVault();
+      try {
+        await this.registerVault();
+      } catch (error) {
+        if (error.status !== 403) throw error;
+        this.data.vaultId = uid("vault");
+        this.data.syncEnabled = false;
+        await this.registerVault();
+      }
       await this.savePluginData();
       new Notice("Signed in with Google.");
     } catch (error) {
@@ -834,8 +924,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
     this.data.syncEnabled = !this.data.syncEnabled;
     if (this.data.syncEnabled) {
-      await this.scanVault({ upload: true });
-      new Notice("Vault sync started.");
+      const synced = await this.scanVault({ upload: true });
+      new Notice(synced ? "Vault sync started." : "Vault sync failed.");
     } else {
       await this.savePluginData();
       new Notice("Vault sync paused.");
@@ -848,8 +938,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
       return;
     }
 
-    await this.scanVault({ upload: this.data.syncEnabled });
-    new Notice(this.data.syncEnabled ? "Vault sync complete." : "Vault scan complete.");
+    const synced = await this.scanVault({ upload: this.data.syncEnabled });
+    new Notice(synced ? (this.data.syncEnabled ? "Vault sync complete." : "Vault scan complete.") : "Vault scanned, but server sync failed.");
   }
 
   async createInvite() {
@@ -874,7 +964,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       return;
     }
 
-    const code = window.prompt("Invite code");
+    const code = await new InviteCodeModal(this.app).openAndWait();
     if (!code) return;
 
     try {
