@@ -308,14 +308,29 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async markVaultAccessDenied(action) {
-    // The server reports we are no longer a member of this vault (an admin
-    // removed us, or we never had access). Leave it entirely: switch to a fresh
-    // personal vault so the shared vault stops appearing as joined and can no
-    // longer sync. Local files stay on disk but are detached from the cloud vault.
+    // The server reports we are no longer a member of this vault (an admin removed
+    // us). Remove the local copy of the shared vault: the removed user loses the
+    // synced content. Only files/folders we KNEW were part of this vault are
+    // trashed (local-only files the user made are left), and they go to Obsidian
+    // trash so they stay recoverable. Then detach to a fresh personal vault so
+    // nothing keeps syncing.
     this.data.serverStatus = "online";
     this.data.syncEnabled = false;
     this.data.syncProgress = 0;
     this.data.vaultStats.syncedFiles = 0;
+
+    // Capture the synced set BEFORE clearing the baselines, then trash it.
+    const syncedPaths = this.getRemoteKnownPaths();
+    const syncedFolders = this.getRemoteKnownFolders();
+    this.wipingVault = true;
+    try {
+      await this.removeLocalVaultContent(syncedPaths, syncedFolders);
+    } catch (error) {
+      // best-effort; even if some files can't be trashed we still detach below
+    } finally {
+      this.wipingVault = false;
+    }
+
     this.data.vaultId = uid("vault");
     this.data.role = "Admin";
     this.data.members = [];
@@ -328,9 +343,33 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.pendingFolderDeletes = [];
     this.data.syncedHashes = {};
     this.data.remoteUpdatedAt = "";
+    this.uploadedSignatures = {};
+    this.dirtyUploadPaths = new Set();
     this.pushQueueItem(action, "Vault access", 0, "removed from vault");
     await this.savePluginData();
-    new Notice("You no longer have access to this vault, so it has been removed. Ask an admin for a new invite to rejoin.");
+    const count = syncedPaths.size;
+    new Notice(`You were removed from this vault. ${count} synced file${count === 1 ? "" : "s"} moved to trash; the vault was detached.`);
+  }
+
+  // Trash the local copy of a vault's synced files and now-empty synced folders
+  // (deepest-first). Used when we lose vault access. `wipingVault` is set by the
+  // caller so handleVaultEvent ignores these self-generated delete events.
+  async removeLocalVaultContent(paths, folders) {
+    for (const p of paths) {
+      if (!p || isIgnoredPath(p)) continue;
+      const f = this.app.vault.getAbstractFileByPath(p);
+      if (f instanceof TFile) {
+        try { await this.app.vault.trash(f, false); } catch (error) { /* skip; best-effort */ }
+      }
+    }
+    const foldersDeepFirst = Array.from(folders).sort((a, b) => b.split("/").length - a.split("/").length);
+    for (const fp of foldersDeepFirst) {
+      if (!fp || fp.startsWith(".") || isIgnoredPath(`${fp}/`)) continue;
+      const folder = this.app.vault.getAbstractFileByPath(fp);
+      if (folder instanceof TFolder && folder.children.length === 0) {
+        try { await this.app.vault.trash(folder, false); } catch (error) { /* skip */ }
+      }
+    }
   }
 
   async fetchVaultMembers() {
@@ -1002,6 +1041,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async handleVaultEvent(action, file, oldPath = "") {
+    // Ignore the delete events our own removal-wipe generates.
+    if (this.wipingVault) return;
     const path = file && file.path ? file.path : oldPath;
     if (this.applyingRemoteChanges) {
       // A genuine USER folder op racing our pull: route it to the folder set (not
