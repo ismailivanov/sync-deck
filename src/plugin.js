@@ -13,6 +13,7 @@ const {
 } = require("./helpers");
 const { SyncDeckView } = require("./view");
 const { SyncDeckSettingTab } = require("./settings-tab");
+const { EditorPresence } = require("./editor-presence");
 
 const REMOTE_POLL_INTERVAL_MS = 1500;
 
@@ -129,6 +130,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
       callback: () => this.activateView(),
     });
     this.startRemotePolling();
+    this.editorPresence = new EditorPresence(this);
+    this.editorPresence.start();
     // A deletion deferred before shutdown (the file was being edited) is not
     // re-detected by the poll, since remoteUpdatedAt is already current. Finish
     // it once on startup if the file is no longer the one being edited.
@@ -140,6 +143,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   onunload() {
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
     if (this.remotePollTimer) window.clearInterval(this.remotePollTimer);
+    if (this.editorPresence) this.editorPresence.stop();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
 
