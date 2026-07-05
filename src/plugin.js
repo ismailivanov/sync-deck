@@ -1,4 +1,4 @@
-const { Modal, Notice, Plugin, TFile, addIcon } = require("obsidian");
+const { MarkdownView, Modal, Notice, Plugin, TFile, addIcon } = require("obsidian");
 const {
   DEFAULT_DATA,
   DEMO_MEMBER_EMAILS,
@@ -40,6 +40,17 @@ function base64ToArrayBuffer(value) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
+}
+
+// SHA-256 hex of a file's bytes, matching the server's per-file hash. Used to
+// decide whether to pull, independent of unreliable cross-machine mtimes.
+async function sha256Hex(buffer) {
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch (error) {
+    return null;
+  }
 }
 
 function isVaultAccessError(error) {
@@ -156,7 +167,15 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   refreshViews() {
-    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => leaf.view.render());
+    // A deferred (not-yet-opened) leaf's view is a placeholder without render();
+    // calling it throws and — because savePluginData() calls this — jammed the
+    // whole sync loop. Guard against it and never let a view error break sync.
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+      const view = leaf && leaf.view;
+      if (view && typeof view.render === "function") {
+        try { view.render(); } catch (error) { /* view render must not break sync */ }
+      }
+    });
   }
 
   normalizeData(data) {
@@ -177,6 +196,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.remoteKnownPaths = Array.isArray(data.remoteKnownPaths) ? data.remoteKnownPaths : [];
     data.remoteKnownVaultId = typeof data.remoteKnownVaultId === "string" ? data.remoteKnownVaultId : "";
     data.pendingDeletes = Array.isArray(data.pendingDeletes) ? data.pendingDeletes : [];
+    data.syncedHashes = data.syncedHashes && typeof data.syncedHashes === "object" ? data.syncedHashes : {};
     data.deferredDeletePath = typeof data.deferredDeletePath === "string" ? data.deferredDeletePath : null;
     if (data.signedIn && data.user.email && !DEMO_MEMBER_EMAILS.has(data.user.email)) {
       const current = {
@@ -302,8 +322,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
   async isTaskDeckFile(file) {
     if (!(file instanceof TFile) || !isMarkdownPath(file.path)) return false;
-    const text = await this.app.vault.cachedRead(file);
-    return text.includes("kanban-card-id:") || text.includes("task-deck-board: true") || text.includes("kanban-board-id:");
+    try {
+      const text = await this.app.vault.cachedRead(file);
+      return text.includes("kanban-card-id:") || text.includes("task-deck-board: true") || text.includes("kanban-board-id:");
+    } catch (error) {
+      // A file deleted/renamed mid-scan must not abort the whole sync.
+      return false;
+    }
   }
 
   async scanVault(options = {}) {
@@ -410,7 +435,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
 
       try {
-        const contentBase64 = arrayBufferToBase64(await this.app.vault.readBinary(file));
+        const buffer = await this.app.vault.readBinary(file);
+        const contentBase64 = arrayBufferToBase64(buffer);
         await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
           method: "POST",
           body: {
@@ -427,6 +453,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
         });
         paths.push(file.path);
         nextSignatures[file.path] = signature;
+        const hash = await sha256Hex(buffer);
+        this.data.syncedHashes = this.data.syncedHashes || {};
+        // If we can't hash locally, drop the entry (force a re-seed on next pull)
+        // rather than leaving a stale hash that could wrongly skip a real edit.
+        if (hash) this.data.syncedHashes[file.path] = hash;
+        else delete this.data.syncedHashes[file.path];
         syncedFiles += 1;
         syncedBytes += file.stat.size || 0;
       } catch (error) {
@@ -461,6 +493,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     const nextKnown = new Set(known);
     paths.forEach((path) => nextKnown.add(path));
     deletedSet.forEach((path) => nextKnown.delete(path));
+    if (this.data.syncedHashes) deletedSet.forEach((path) => delete this.data.syncedHashes[path]);
     this.setRemoteKnownPaths(Array.from(nextKnown));
     // Keep only intents that are still unresolved: path still gone locally and
     // still believed present on the server. Deleted, reappeared, or never-remote
@@ -478,6 +511,24 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.syncQueue = this.data.syncQueue.filter((item) => !(item.status === "pending" && paths.includes(item.path)));
     this.pushQueueItem("upload", "Vault files", syncedBytes, "done");
     await this.pushScanSummary();
+  }
+
+  // True if the path is open in a Markdown editor whose buffer differs from disk
+  // (un-flushed keystrokes) — so a pull must not overwrite and discard them.
+  async pathHasUnsavedEditor(path, localFile) {
+    try {
+      const leaves = this.app.workspace.getLeavesOfType("markdown");
+      for (const leaf of leaves) {
+        const view = leaf && leaf.view;
+        if (view instanceof MarkdownView && view.file && view.file.path === path && view.editor && typeof view.editor.getValue === "function") {
+          const disk = await this.app.vault.read(localFile);
+          if (view.editor.getValue() !== disk) return true;
+        }
+      }
+    } catch (error) {
+      // best-effort; on any error fall through to allowing the pull
+    }
+    return false;
   }
 
   async ensureParentFolder(filePath) {
@@ -556,12 +607,27 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
       this.applyingRemoteChanges = true;
       try {
+        this.data.syncedHashes = this.data.syncedHashes || {};
         for (const remoteFile of manifest.files || []) {
           if (!remoteFile.path || isIgnoredPath(remoteFile.path)) continue;
           if (dirty.has(remoteFile.path)) continue;
 
           const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
-          if (localFile instanceof TFile && (localFile.stat.mtime || 0) >= (remoteFile.mtime || 0)) continue;
+          // Pull only when the content actually differs, decided by hash (NOT by
+          // cross-machine mtime, which clock skew makes unreliable and which was
+          // silently skipping real edits). Seed the local hash once so we don't
+          // needlessly re-pull identical content on the first sync after an update.
+          if (remoteFile.hash) {
+            let knownHash = this.data.syncedHashes[remoteFile.path];
+            if (knownHash === undefined && localFile instanceof TFile) {
+              knownHash = await sha256Hex(await this.app.vault.readBinary(localFile));
+              if (knownHash) this.data.syncedHashes[remoteFile.path] = knownHash;
+            }
+            if (knownHash === remoteFile.hash) continue;
+          }
+
+          // Never overwrite a file open in an editor with un-flushed keystrokes.
+          if (localFile instanceof TFile && await this.pathHasUnsavedEditor(remoteFile.path, localFile)) continue;
 
           this.pullTouchedPaths.add(remoteFile.path);
           const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
@@ -571,9 +637,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (localFile instanceof TFile) await this.app.vault.modifyBinary(localFile, content);
           else await this.app.vault.createBinary(remoteFile.path, content);
 
-          // Record the pulled file's post-write signature so the next incremental
-          // upload treats it as already-synced instead of echoing it back to the
-          // server with a bumped local mtime (which would ping-pong between devices).
+          // Record what we now have (hash + post-write signature) so the next
+          // incremental upload does not echo this pulled file back to the server.
+          // Use the CONTENT endpoint's hash (authoritative for the bytes we just
+          // wrote), not the manifest hash which a concurrent upload can outdate.
+          this.data.syncedHashes[remoteFile.path] = (remote.file && remote.file.hash) || (await sha256Hex(content)) || remoteFile.hash;
           const writtenFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
           if (writtenFile instanceof TFile) {
             this.uploadedSignatures = this.uploadedSignatures || {};
@@ -607,6 +675,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
             this.pullTouchedPaths.add(file.path);
             await this.app.vault.trash(file, false);
             if (this.uploadedSignatures) delete this.uploadedSignatures[file.path];
+            if (this.data.syncedHashes) delete this.data.syncedHashes[file.path];
             trashedFiles += 1;
           } catch (error) {
             // ignore individual delete failures; a later pull retries
@@ -725,6 +794,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.autoSyncRunning = true;
       try {
         await this.scanVault({ upload: true, incremental: true });
+      } catch (error) {
+        // Never let an unexpected scan rejection silently kill auto-sync: mark
+        // offline and let the next local edit re-arm the retry.
+        this.data.serverStatus = "offline";
       } finally {
         this.autoSyncRunning = false;
       }
