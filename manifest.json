@@ -1,6 +1,6 @@
 {
   "id": "sync-deck",
-  "name": "SyncDeck",
+  "name": "Sync Deck",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
   "description": "Realtime vault sync and team presence for Obsidian.",
