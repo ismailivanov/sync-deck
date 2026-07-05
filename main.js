@@ -1077,34 +1077,46 @@ module.exports = class SyncDeckPlugin extends Plugin {
     let syncedFiles = 0;
     let syncedBytes = 0;
     const paths = [];
+    const failed = new Set();
 
     for (const file of files) {
       const signature = `${file.stat.mtime || 0}:${file.stat.size || 0}`;
-      paths.push(file.path);
-      nextSignatures[file.path] = signature;
-      if (incremental && previous[file.path] === signature && !dirty.has(file.path)) continue;
+      if (incremental && previous[file.path] === signature && !dirty.has(file.path)) {
+        paths.push(file.path); // unchanged -> already on the server
+        nextSignatures[file.path] = signature;
+        continue;
+      }
 
-      const contentBase64 = arrayBufferToBase64(await this.app.vault.readBinary(file));
-      await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
-        method: "POST",
-        body: {
-          deviceId: this.data.deviceId,
-          files: [{
-            path: file.path,
-            size: file.stat.size || 0,
-            mtime: file.stat.mtime || 0,
-            ctime: file.stat.ctime || 0,
-            type: isMarkdownPath(file.path) ? "markdown" : "file",
-            contentBase64,
-          }],
-        },
-      });
-
-      syncedFiles += 1;
-      syncedBytes += file.stat.size || 0;
+      try {
+        const contentBase64 = arrayBufferToBase64(await this.app.vault.readBinary(file));
+        await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
+          method: "POST",
+          body: {
+            deviceId: this.data.deviceId,
+            files: [{
+              path: file.path,
+              size: file.stat.size || 0,
+              mtime: file.stat.mtime || 0,
+              ctime: file.stat.ctime || 0,
+              type: isMarkdownPath(file.path) ? "markdown" : "file",
+              contentBase64,
+            }],
+          },
+        });
+        paths.push(file.path);
+        nextSignatures[file.path] = signature;
+        syncedFiles += 1;
+        syncedBytes += file.stat.size || 0;
+      } catch (error) {
+        // One file failing must not abort the whole sync. Leave it un-synced: not
+        // in `paths` (so it is never recorded as on-server, which would let the
+        // pull trash it), no signature (retries next sync), and left dirty.
+        failed.add(file.path);
+      }
     }
     this.uploadedSignatures = nextSignatures;
-    if (this.dirtyUploadPaths) dirty.forEach((path) => this.dirtyUploadPaths.delete(path));
+    if (this.dirtyUploadPaths) dirty.forEach((path) => { if (!failed.has(path)) this.dirtyUploadPaths.delete(path); });
+    if (failed.size) this.pushQueueItem("upload", `${failed.size} file(s) will retry`, 0, "retry");
 
     // Explicitly delete only the files THIS device intentionally removed: paths
     // we knew were on the server, that fired a local delete/rename event, and that
