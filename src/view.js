@@ -34,6 +34,20 @@ class SyncDeckView extends ItemView {
     // Keep the member list live-ish while the panel is open so an admin sees
     // workers join and a removed worker's own panel updates promptly.
     this.membersTimer = window.setInterval(() => this.plugin.fetchVaultMembers(), 8000);
+    // First-run Pro offer (once), after plan/billing have had a moment to load.
+    window.setTimeout(() => this.maybeShowOnboarding(), 800);
+  }
+
+  // Show the upgrade modal once for a new Free user (with a "Continue with Free"
+  // escape). Only fires when billing is live so the buttons work; otherwise it
+  // waits for a later open. Marked as shown only when actually presented.
+  maybeShowOnboarding() {
+    const d = this.plugin.data;
+    if (d.onboarded) return;
+    if (!d.signedIn || d.plan === "pro" || !d.billingEnabled) return;
+    d.onboarded = true;
+    this.plugin.savePluginData();
+    this.plugin.openUpgradeModal();
   }
 
   async onClose() {
@@ -62,7 +76,15 @@ class SyncDeckView extends ItemView {
       );
     }
 
+    shell.append(this.renderFooter());
     this.contentEl.append(shell);
+  }
+
+  renderFooter() {
+    const footer = createElement("div", "sd-footer");
+    footer.append(textButton("life-buoy", "Support", () => window.open("mailto:support@syncdeck.cloud"), "sd-ghost-btn"));
+    footer.append(textButton("book-open", "Guide", () => window.open("https://github.com/ismailivanov/SyncDeck"), "sd-ghost-btn"));
+    return footer;
   }
 
   // ---- Header ---------------------------------------------------------------

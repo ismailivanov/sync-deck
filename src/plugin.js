@@ -192,6 +192,9 @@ class UpgradeModal extends Modal {
     }
 
     contentEl.createEl("p", { cls: "sd-upgrade-foot", text: "Cancel anytime · Secure checkout by Stripe" });
+
+    const free = contentEl.createEl("button", { text: "Continue with Free", cls: "sd-continue-free" });
+    free.addEventListener("click", () => this.close());
   }
 
   onClose() {
@@ -430,6 +433,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.boardLimit = data.boardLimit === null || Number.isFinite(Number(data.boardLimit)) ? data.boardLimit : DEFAULT_DATA.boardLimit;
     data.billingEnabled = !!data.billingEnabled;
     data.billingYearly = !!data.billingYearly;
+    data.onboarded = !!data.onboarded;
     data.storageBlocked = !!data.storageBlocked;
     data.storageBlockedReason = typeof data.storageBlockedReason === "string" ? data.storageBlockedReason : "";
     data.vaultList = Array.isArray(data.vaultList) ? data.vaultList : [];
