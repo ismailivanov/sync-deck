@@ -334,7 +334,10 @@ class SyncDeckView extends ItemView {
     if ((data.role || "") === "Admin") {
       headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
     }
-    if (!ownsActive) {
+    if (ownsActive) {
+      // Owner can delete the open vault (returns to no-vault state; files kept).
+      headActions.append(textButton("trash-2", "", () => this.plugin.deleteVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
+    } else {
       // A member (worker) can leave the vault they joined; their local files stay.
       headActions.append(textButton("log-out", "", () => this.plugin.leaveVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
     }
@@ -1795,24 +1798,33 @@ module.exports = class SyncDeckPlugin extends Plugin {
   // for non-active vaults, so you never delete the one you're currently on.
   async deleteVault(vault) {
     if (!this.data.signedIn || !vault || !vault.vaultId) return;
-    if (vault.vaultId === this.data.vaultId) { new Notice("Switch to another vault before deleting this one."); return; }
     if (vault.owner && vault.owner !== this.data.user.email) { new Notice("Only the owner can delete a vault."); return; }
+    const deletingId = vault.vaultId;
+    const isActive = deletingId === this.data.vaultId;
     const name = vault.workspace || "this vault";
     const confirmed = await new ConfirmModal(this.app, {
       title: `Delete ${name}?`,
-      body: `This permanently deletes ${name} and all of its synced files from the server, for everyone. Members lose access and it can't be undone. Your local files are not touched.`,
+      body: `This permanently deletes ${name} and all of its synced files from the server, for everyone. Members lose access and it can't be undone.${isActive ? " This device stops syncing it and returns to no open vault; your local files are kept." : " Your local files are not touched."}`,
       confirmText: "Delete vault",
       danger: true,
     }).openAndWait();
     if (!confirmed) return;
-    try {
-      await this.api(`/vaults/${encodeURIComponent(vault.vaultId)}/delete`, { method: "POST" });
-      await this.fetchVaultList();
+    // Deleting the ACTIVE vault: detach FIRST (clears the known-set) so no
+    // in-flight poll can trash the kept local files once it's gone server-side,
+    // and the top returns to the no-vault state.
+    if (isActive) {
+      this.detachToEmptyVault();
+      await this.savePluginData();
       this.refreshViews();
+    }
+    try {
+      await this.api(`/vaults/${encodeURIComponent(deletingId)}/delete`, { method: "POST" });
       new Notice(`Deleted ${name}.`);
     } catch (error) {
       new Notice(`Could not delete: ${error.message}`);
     }
+    await this.fetchVaultList();
+    this.refreshViews();
   }
 
   // Detach from the active vault WITHOUT trashing local files: land on a fresh,
