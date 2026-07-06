@@ -184,6 +184,8 @@
 }
 .sd-icon-badge svg { width: 17px; height: 17px; }
 
+.sd-vc-head-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+
 .sd-vc-meta {
   font-size: 12px;
   font-weight: 600;
@@ -293,6 +295,40 @@
 }
 
 .sd-actions-row { display: flex; gap: 8px; }
+.sd-row-side { display: flex; align-items: center; gap: 4px; flex: none; }
+
+/* Vault inspector modal */
+.sd-inspect-sub {
+  margin: 2px 0 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+.sd-inspect-list {
+  max-height: 340px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+}
+.sd-inspect-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 13px;
+}
+.sd-inspect-row:first-child { border-top: none; }
+.sd-inspect-icon { display: inline-flex; color: var(--text-muted); flex: none; }
+.sd-inspect-icon svg { width: 15px; height: 15px; }
+.sd-inspect-path {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sd-inspect-size { color: var(--text-muted); font-size: 12px; font-weight: 600; flex: none; }
 
 /* Members */
 .sd-member-main { flex-direction: row; align-items: center; gap: 10px; }

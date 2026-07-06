@@ -218,7 +218,7 @@ class SyncDeckView extends ItemView {
     } else {
       shell.append(
         this.renderActiveVaultCard(),
-        this.renderOtherVaults(),
+        this.renderVaultsSection(),
         this.renderPeople(),
         this.renderActivity()
       );
@@ -283,9 +283,12 @@ class SyncDeckView extends ItemView {
     const isPro = data.plan === "pro";
     nameWrap.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
     head.append(nameWrap);
+    const headActions = createElement("div", "sd-vc-head-actions");
+    headActions.append(textButton("eye", "", () => this.plugin.inspectVault({ vaultId: data.vaultId, workspace: data.workspace }), "sd-icon-btn"));
     if ((data.role || "") === "Admin") {
-      head.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
+      headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
     }
+    head.append(headActions);
     card.append(head);
 
     // Role · files · size (from the server vault list when available).
@@ -365,26 +368,34 @@ class SyncDeckView extends ItemView {
     return row;
   }
 
-  // ---- Other vaults (switcher) ---------------------------------------------
-  renderOtherVaults() {
+  // ---- Vaults (switch / create / inspect) ----------------------------------
+  renderVaultsSection() {
     const data = this.plugin.data;
     const others = (Array.isArray(data.vaultList) ? data.vaultList : []).filter((v) => v.vaultId !== data.vaultId);
-    if (!others.length) return createElement("div", "sd-hidden");
+    const section = this.section("Vaults", others.length || null);
 
-    const section = this.section(`Other vaults`, others.length);
-    const list = createElement("div", "sd-rows");
-    others.forEach((v) => {
-      const row = createElement("div", "sd-row");
-      const main = createElement("div", "sd-row-main");
-      main.append(createElement("strong", "", v.workspace || "Vault"));
-      const files = v.fileCount || 0;
-      main.append(createElement("span", "sd-row-sub", `${v.role || "Worker"} · ${files ? `${files} file${files === 1 ? "" : "s"} · ${formatBytes(v.sizeBytes || 0)}` : "empty"}`));
-      row.append(main);
-      row.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
-      list.append(row);
-    });
-    section.append(list);
-    section.append(createElement("p", "sd-hint", "Switching moves the current vault's synced files to trash, then pulls the chosen one — so vaults never mix."));
+    if (others.length) {
+      const list = createElement("div", "sd-rows");
+      others.forEach((v) => {
+        const row = createElement("div", "sd-row");
+        const main = createElement("div", "sd-row-main");
+        main.append(createElement("strong", "", v.workspace || "Vault"));
+        const files = v.fileCount || 0;
+        main.append(createElement("span", "sd-row-sub", `${v.role || "Worker"} · ${files ? `${files} file${files === 1 ? "" : "s"} · ${formatBytes(v.sizeBytes || 0)}` : "empty"}`));
+        row.append(main);
+        const side = createElement("div", "sd-row-side");
+        side.append(textButton("eye", "", () => this.plugin.inspectVault(v), "sd-icon-btn"));
+        side.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
+        row.append(side);
+        list.append(row);
+      });
+      section.append(list);
+    }
+
+    const actions = createElement("div", "sd-actions-row");
+    actions.append(textButton("plus", "New vault", () => this.plugin.createNewVault(), "sd-grow"));
+    section.append(actions);
+    section.append(createElement("p", "sd-hint", "A new or switched vault opens on its own — the current vault's synced files move to trash (recoverable) so vaults never mix. Tap the eye to peek inside any vault."));
     return section;
   }
 
@@ -953,7 +964,7 @@ module.exports = { EditorPresence };
 
   },
   "src/plugin.js": function(module, exports, __require) {
-const { MarkdownView, Modal, Notice, Plugin, TFile, TFolder, addIcon } = require("obsidian");
+const { MarkdownView, Modal, Notice, Plugin, TFile, TFolder, addIcon, setIcon } = require("obsidian");
 const {
   DEFAULT_DATA,
   DEMO_MEMBER_EMAILS,
@@ -961,6 +972,7 @@ const {
   ICON_SVG,
   VIEW_TYPE,
   clone,
+  formatBytes,
   isIgnoredPath,
   isMarkdownPath,
   uid,
@@ -1241,6 +1253,51 @@ class TextPromptModal extends Modal {
   onClose() {
     this.contentEl.empty();
     if (this.resolve) this.finish(null);
+  }
+}
+
+// Read-only view of a vault's synced items. Fetches the vault manifest (any
+// member may read it) and lists the files compactly — without switching to it.
+class VaultInspectModal extends Modal {
+  constructor(app, plugin, vault) {
+    super(app);
+    this.plugin = plugin;
+    this.vault = vault || {};
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("sd-inspect-modal");
+    contentEl.createEl("h2", { text: this.vault.workspace || "Vault" });
+    const sub = contentEl.createEl("p", { cls: "sd-inspect-sub", text: "Loading…" });
+    const list = contentEl.createDiv({ cls: "sd-inspect-list" });
+    this.load(sub, list);
+  }
+
+  async load(sub, list) {
+    try {
+      const manifest = await this.plugin.api(`/vaults/${encodeURIComponent(this.vault.vaultId)}/files`);
+      const files = (Array.isArray(manifest.files) ? manifest.files.slice() : []).sort((a, b) => a.path.localeCompare(b.path));
+      const total = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+      sub.textContent = files.length
+        ? `${files.length} file${files.length === 1 ? "" : "s"} · ${formatBytes(total)}`
+        : "This vault has no synced files yet.";
+      list.empty();
+      files.forEach((f) => {
+        const row = list.createDiv({ cls: "sd-inspect-row" });
+        const icon = row.createSpan({ cls: "sd-inspect-icon" });
+        try { setIcon(icon, isMarkdownPath(f.path) ? "file-text" : "file"); } catch (e) { /* ignore */ }
+        row.createSpan({ cls: "sd-inspect-path", text: f.path });
+        row.createSpan({ cls: "sd-inspect-size", text: formatBytes(Number(f.size) || 0) });
+      });
+    } catch (error) {
+      sub.textContent = `Could not load this vault: ${error.message}`;
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
@@ -1530,6 +1587,28 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }
   }
 
+  // Create a fresh EMPTY vault and switch to it. Reuses the switch flow: the
+  // current vault's synced files go to trash (recoverable, still safe on the
+  // server) and the new vault opens blank. Registering it on first sync creates
+  // it server-side owned by you.
+  async createNewVault() {
+    if (!this.data.signedIn) { new Notice("Sign in first."); return; }
+    const name = await new TextPromptModal(this.app, {
+      title: "Create a vault",
+      body: "A new empty vault opens on this device. Your current vault's synced files move to trash (recoverable) and stay safe on the server — switch back any time.",
+      placeholder: "Vault name",
+      confirmText: "Create vault",
+    }).openAndWait();
+    if (!name) return;
+    await this.switchToVault({ vaultId: uid("vault"), workspace: name, owner: this.data.user.email, role: "Admin", isNew: true });
+  }
+
+  // Open a read-only inspector for any vault the user can access.
+  inspectVault(vault) {
+    if (!vault || !vault.vaultId) return;
+    new VaultInspectModal(this.app, this, vault).open();
+  }
+
   // The vaults this user can access (owned + joined), for the switchable list.
   async fetchVaultList() {
     if (!this.data.signedIn || !this.data.authToken) return;
@@ -1574,14 +1653,19 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
     let started = false;
     try {
-      const syncedCount = this.getRemoteKnownPaths().size;
-      const name = target.workspace || "the selected vault";
-      const confirmed = await new ConfirmModal(this.app, {
-        title: `Switch to ${target.workspace || "this vault"}?`,
-        body: `This device will sync ${name} from now on. ${syncedCount} file${syncedCount === 1 ? "" : "s"} synced from your current vault will be moved to Obsidian trash (recoverable), then ${name} is pulled in. This avoids the two vaults mixing together.`,
-        confirmText: "Switch vault",
-        danger: true,
-      }).openAndWait();
+      // A brand-new vault was already confirmed via its name prompt, so skip the
+      // second dialog; an existing-vault switch gets the destructive warning.
+      let confirmed = true;
+      if (!target.isNew) {
+        const syncedCount = this.getRemoteKnownPaths().size;
+        const name = target.workspace || "the selected vault";
+        confirmed = await new ConfirmModal(this.app, {
+          title: `Switch to ${target.workspace || "this vault"}?`,
+          body: `This device will sync ${name} from now on. ${syncedCount} file${syncedCount === 1 ? "" : "s"} synced from your current vault will be moved to Obsidian trash (recoverable), then ${name} is pulled in. This avoids the two vaults mixing together.`,
+          confirmText: "Switch vault",
+          danger: true,
+        }).openAndWait();
+      }
       if (!confirmed) return; // finally just releases the guard; sync state untouched
 
       started = true;
@@ -1638,7 +1722,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
         await this.fetchPlan();
         await this.pullLatest();
         this.seedUploadSignaturesFromDisk();
-        new Notice(`Switched to ${this.data.workspace}. Sync is on.`);
+        new Notice(target.isNew ? `Created ${this.data.workspace}. It's empty and syncing.` : `Switched to ${this.data.workspace}. Sync is on.`);
       } catch (error) {
         this.seedUploadSignaturesFromDisk();
         new Notice(`Switched vault, but the first pull failed: ${error.message}. It will retry automatically.`);
