@@ -5,3 +5,5 @@ server/server.pid
 server/storage/
 .DS_Store
 .claude/launch.json
+docs/DEVELOPMENT_PLAN.md
+syncdeck-private/
