@@ -1,7 +1,7 @@
 # Sync Deck
 
 [![Obsidian](https://img.shields.io/badge/Obsidian-1.5%2B-7c3aed?logo=obsidian&logoColor=white)](https://obsidian.md)
-[![Release](https://img.shields.io/github/v/release/ismailivanov/SyncDeck?label=release)](https://github.com/ismailivanov/SyncDeck/releases)
+[![Release](https://img.shields.io/github/v/release/ismailivanov/sync-deck?label=release)](https://github.com/ismailivanov/sync-deck/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f1c40f.svg)](LICENSE)
 [![Support](https://img.shields.io/badge/support-Buy%20Me%20a%20Coffee-ffdd00.svg)](https://buymeacoffee.com/carbon06)
 
@@ -34,14 +34,14 @@ Pro is **$4 / month** or **$39 / year**. Upgrade any time from the Sync Deck pan
 
 Until Sync Deck lands in the community plugins list, install it manually:
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/ismailivanov/SyncDeck/releases).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/ismailivanov/sync-deck/releases).
 2. Put them in your vault under `.obsidian/plugins/sync-deck/`.
 3. Enable **Sync Deck** in Obsidian's *Community plugins* settings.
 
 Or clone straight into your plugins folder for the latest source:
 
 ```bash
-git clone https://github.com/ismailivanov/SyncDeck.git "/path/to/vault/.obsidian/plugins/sync-deck"
+git clone https://github.com/ismailivanov/sync-deck.git "/path/to/vault/.obsidian/plugins/sync-deck"
 ```
 
 ## How it works
