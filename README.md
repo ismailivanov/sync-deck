@@ -1,42 +1,27 @@
-# SyncDeck
+# Sync Deck
 
-SyncDeck is an Obsidian cloud sync plugin for team vaults.
+Sync Deck is an Obsidian plugin that syncs your vault across devices and with
+your team through a hosted cloud service.
 
-The current build includes:
+Features:
 
 - Google sign-in
 - Vault scan, upload, pull, and auto-sync on local file changes
-- Invite codes for joining the same cloud vault
-- A small Node API for auth, vault metadata, and file storage
+- File, folder (including empty folders), and card-order sync
+- Invite codes to join a shared vault, with Admin / Worker roles
+- Live presence and cursors while collaborating
 
-Realtime presence, conflict handling, and billing will come later.
+## Install (development)
 
-## Obsidian development install
-
-Clone the repo directly into an Obsidian plugin folder:
-
-```bash
-git clone git@github.com:ismailivanov/SyncDeck.git "/path/to/vault/.obsidian/plugins/sync-deck"
-```
-
-Then enable **SyncDeck** from Obsidian's Community plugins screen.
-
-## Local API
-
-Run the development API:
+Clone directly into your Obsidian plugins folder:
 
 ```bash
-GOOGLE_CLIENT_ID="your-client-id" \
-GOOGLE_CLIENT_SECRET="your-client-secret" \
-node server/index.js
+git clone https://github.com/ismailivanov/SyncDeck.git "/path/to/vault/.obsidian/plugins/sync-deck"
 ```
 
-The plugin uses `https://api.syncdeck.cloud` by default.
+Then enable **Sync Deck** from Obsidian's Community plugins screen.
 
-See [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md) for the current server and roadmap notes.
+## How it works
 
-Create a Google OAuth web client and add this authorized redirect URI:
-
-```text
-https://api.syncdeck.cloud/auth/google/callback
-```
+The plugin syncs through the hosted API at `https://api.syncdeck.cloud`. Open the
+Sync Deck panel and sign in with Google to get started.
