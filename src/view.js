@@ -135,10 +135,11 @@ class SyncDeckView extends ItemView {
       "p",
       "sd-signedout-copy",
       hasVaults
-        ? "Open one of your vaults below, or create a new one. Nothing syncs until you do."
-        : "Create a vault to start syncing this Obsidian vault. You'll choose whether to include your existing files."
+        ? "Open one of your vaults below, create a new one, or join a vault someone shared with you. Nothing syncs until you do."
+        : "Create a vault to start syncing this Obsidian vault, or join one someone shared with you."
     ));
     wrap.append(textButton("plus", "Create a vault", () => this.plugin.createNewVault(), "sd-primary-btn sd-block-btn"));
+    wrap.append(textButton("key-round", "Join a vault", () => this.plugin.joinInvite(), "sd-block-btn"));
     return wrap;
   }
 
