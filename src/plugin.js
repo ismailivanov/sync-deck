@@ -851,18 +851,28 @@ module.exports = class SyncDeckPlugin extends Plugin {
     const name = vault.workspace || "this vault";
     const confirmed = await new ConfirmModal(this.app, {
       title: isOwner ? `Close ${name}?` : `Leave ${name}?`,
-      body: isOwner
-        ? `This device stops syncing ${name} and returns to no open vault. Your local files are kept, and the vault stays on the server (still yours, members intact) — open it again any time.`
-        : (isActive
-          ? `You'll stop syncing ${name} and leave it. Your local files stay exactly as they are. You can rejoin later only with a new invite.`
-          : `You'll leave ${name}. You can rejoin later only with a new invite.`),
+      body: isActive
+        ? `${name}'s synced files move to your Obsidian trash (recoverable); your own local files stay, and you switch to working locally.${isOwner ? " The vault stays on the server (still yours) — open it again to bring the files back." : " You can rejoin later only with a new invite."}`
+        : `You'll leave ${name}. You can rejoin later only with a new invite.`,
       confirmText: isOwner ? "Close vault" : "Leave vault",
-      danger: !isOwner,
+      danger: true,
     }).openAndWait();
     if (!confirmed) return;
 
-    // Detach FIRST (clears the known-set) so no in-flight poll can trash files.
+    // Move THIS vault's synced files to trash (recoverable) so only your own
+    // local files remain, then detach to the no-vault (local) state. Capture the
+    // known-set BEFORE detach clears it. wipingVault ignores our own deletes.
     if (isActive) {
+      const syncedPaths = this.getRemoteKnownPaths();
+      const syncedFolders = this.getRemoteKnownFolders();
+      this.wipingVault = true;
+      try {
+        await this.removeLocalVaultContent(syncedPaths, syncedFolders);
+      } catch (error) {
+        // best-effort
+      } finally {
+        this.wipingVault = false;
+      }
       this.detachToEmptyVault();
       await this.savePluginData();
       this.refreshViews();
@@ -881,7 +891,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }
     await this.fetchVaultList();
     this.refreshViews();
-    new Notice(isOwner ? `Closed ${name}. Your local files are kept.` : `Left ${name}. Your local files are untouched.`);
+    new Notice(isOwner
+      ? `Closed ${name}. Its synced files moved to trash; your own local files stay.`
+      : `Left ${name}. Its synced files moved to trash; your own local files stay.`);
   }
 
   // The vaults this user can access (owned + joined), for the switchable list.
