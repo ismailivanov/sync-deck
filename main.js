@@ -282,21 +282,20 @@ class SyncDeckView extends ItemView {
 
   renderTermsGate() {
     const wrap = createElement("div", "sd-card sd-signedout sd-terms");
-    wrap.append(createElement("h3", "sd-signedout-title", "Before you start"));
-    wrap.append(createElement("p", "sd-signedout-copy", "Please review and accept Sync Deck's terms to continue."));
-    const points = createElement("ul", "sd-terms-points");
-    [
-      "Sync Deck syncs your notes through a hosted cloud service.",
-      "No end-to-end encryption yet — don't sync passwords, secrets, or other people's personal data.",
-      "Provided “as is”, with no warranty; the service can change or stop at any time. Keep your own backups — your notes always stay on your device.",
-      "We store the files you sync plus your Google account email and name. We never sell your data.",
-    ].forEach((t) => points.append(createElement("li", "", t)));
-    wrap.append(points);
-    wrap.append(textButton("external-link", "Read the full terms", () => this.plugin.openTermsPage(), "sd-ghost-btn sd-block-btn"));
-    const actions = createElement("div", "sd-actions-row");
-    actions.append(textButton("check", "I accept", () => this.plugin.acceptTerms(), "sd-primary-btn sd-grow"));
-    actions.append(textButton("x", "Decline", () => this.plugin.declineTerms(), "sd-grow"));
-    wrap.append(actions);
+    wrap.append(createElement("h3", "sd-signedout-title", "Terms & Privacy"));
+    wrap.append(createElement("p", "sd-signedout-copy", "To use Sync Deck, please read and accept the Terms of Service and Privacy Notice."));
+    wrap.append(textButton("external-link", "Read the Terms & Privacy Notice", () => this.plugin.openTermsPage(), "sd-ghost-btn sd-block-btn"));
+
+    const row = createElement("label", "sd-terms-check");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    row.append(box, createElement("span", "", "I have read and agree to the Terms of Service and Privacy Notice."));
+    wrap.append(row);
+
+    const cont = textButton("check", "Continue", () => { if (box.checked) this.plugin.acceptTerms(); }, "sd-primary-btn sd-block-btn");
+    cont.disabled = true;
+    box.addEventListener("change", () => { cont.disabled = !box.checked; });
+    wrap.append(cont);
     return wrap;
   }
 
@@ -1078,7 +1077,7 @@ const { EditorPresence } = __require("src/editor-presence.js");
 
 // Terms of Service. Bump this date when TERMS.md changes materially — users are
 // re-prompted to accept when their accepted version != the current one.
-const CURRENT_TERMS_VERSION = "2026-07-06";
+const CURRENT_TERMS_VERSION = "2026-07-06.1";
 const TERMS_URL = "https://github.com/ismailivanov/sync-deck/blob/main/TERMS.md";
 
 const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)

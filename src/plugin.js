@@ -17,7 +17,7 @@ const { EditorPresence } = require("./editor-presence");
 
 // Terms of Service. Bump this date when TERMS.md changes materially — users are
 // re-prompted to accept when their accepted version != the current one.
-const CURRENT_TERMS_VERSION = "2026-07-06";
+const CURRENT_TERMS_VERSION = "2026-07-06.1";
 const TERMS_URL = "https://github.com/ismailivanov/sync-deck/blob/main/TERMS.md";
 
 const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
