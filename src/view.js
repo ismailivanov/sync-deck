@@ -56,7 +56,7 @@ class SyncDeckView extends ItemView {
     } else {
       shell.append(
         this.renderActiveVaultCard(),
-        this.renderOtherVaults(),
+        this.renderVaultsSection(),
         this.renderPeople(),
         this.renderActivity()
       );
@@ -121,9 +121,12 @@ class SyncDeckView extends ItemView {
     const isPro = data.plan === "pro";
     nameWrap.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
     head.append(nameWrap);
+    const headActions = createElement("div", "sd-vc-head-actions");
+    headActions.append(textButton("eye", "", () => this.plugin.inspectVault({ vaultId: data.vaultId, workspace: data.workspace }), "sd-icon-btn"));
     if ((data.role || "") === "Admin") {
-      head.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
+      headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
     }
+    head.append(headActions);
     card.append(head);
 
     // Role · files · size (from the server vault list when available).
@@ -203,26 +206,34 @@ class SyncDeckView extends ItemView {
     return row;
   }
 
-  // ---- Other vaults (switcher) ---------------------------------------------
-  renderOtherVaults() {
+  // ---- Vaults (switch / create / inspect) ----------------------------------
+  renderVaultsSection() {
     const data = this.plugin.data;
     const others = (Array.isArray(data.vaultList) ? data.vaultList : []).filter((v) => v.vaultId !== data.vaultId);
-    if (!others.length) return createElement("div", "sd-hidden");
+    const section = this.section("Vaults", others.length || null);
 
-    const section = this.section(`Other vaults`, others.length);
-    const list = createElement("div", "sd-rows");
-    others.forEach((v) => {
-      const row = createElement("div", "sd-row");
-      const main = createElement("div", "sd-row-main");
-      main.append(createElement("strong", "", v.workspace || "Vault"));
-      const files = v.fileCount || 0;
-      main.append(createElement("span", "sd-row-sub", `${v.role || "Worker"} · ${files ? `${files} file${files === 1 ? "" : "s"} · ${formatBytes(v.sizeBytes || 0)}` : "empty"}`));
-      row.append(main);
-      row.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
-      list.append(row);
-    });
-    section.append(list);
-    section.append(createElement("p", "sd-hint", "Switching moves the current vault's synced files to trash, then pulls the chosen one — so vaults never mix."));
+    if (others.length) {
+      const list = createElement("div", "sd-rows");
+      others.forEach((v) => {
+        const row = createElement("div", "sd-row");
+        const main = createElement("div", "sd-row-main");
+        main.append(createElement("strong", "", v.workspace || "Vault"));
+        const files = v.fileCount || 0;
+        main.append(createElement("span", "sd-row-sub", `${v.role || "Worker"} · ${files ? `${files} file${files === 1 ? "" : "s"} · ${formatBytes(v.sizeBytes || 0)}` : "empty"}`));
+        row.append(main);
+        const side = createElement("div", "sd-row-side");
+        side.append(textButton("eye", "", () => this.plugin.inspectVault(v), "sd-icon-btn"));
+        side.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
+        row.append(side);
+        list.append(row);
+      });
+      section.append(list);
+    }
+
+    const actions = createElement("div", "sd-actions-row");
+    actions.append(textButton("plus", "New vault", () => this.plugin.createNewVault(), "sd-grow"));
+    section.append(actions);
+    section.append(createElement("p", "sd-hint", "A new or switched vault opens on its own — the current vault's synced files move to trash (recoverable) so vaults never mix. Tap the eye to peek inside any vault."));
     return section;
   }
 
