@@ -694,10 +694,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (count === 0) return "empty";
     return new ChoiceModal(this.app, {
       title: `Set up ${vaultName || "your vault"}`,
-      body: `You have ${count} file${count === 1 ? "" : "s"} in this Obsidian vault. Add them to this vault now, or start empty and sync only what you add from here on?`,
+      body: `You have ${count} file${count === 1 ? "" : "s"} in this Obsidian vault. Add them to the new vault, or start empty — your current files move to Obsidian trash (recoverable) so the vault begins clean.`,
       choices: [
         { key: "add", label: `Add my ${count} file${count === 1 ? "" : "s"}`, cta: true },
-        { key: "empty", label: "Start empty" },
+        { key: "empty", label: "Start empty (trash current files)" },
       ],
     }).openAndWait();
   }
@@ -737,7 +737,23 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (choice === "add") {
         await this.scanVault({ upload: true }); // seed the vault with local files
       } else {
-        this.seedUploadSignaturesFromDisk(); // keep files local; don't upload them
+        // Start empty: move the current local files to Obsidian trash (recoverable)
+        // so the folder matches the empty vault. wipingVault makes our own delete
+        // events ignored; seed afterwards so anything that resisted trashing isn't
+        // then uploaded.
+        const paths = this.collectSyncableFiles().map((f) => f.path);
+        const folders = this.app.vault.getAllLoadedFiles()
+          .filter((f) => f instanceof TFolder && f.path && f.path !== "/" && !isIgnoredPath(`${f.path}/`))
+          .map((f) => f.path);
+        this.wipingVault = true;
+        try {
+          await this.removeLocalVaultContent(new Set(paths), new Set(folders));
+        } catch (error) {
+          // best-effort
+        } finally {
+          this.wipingVault = false;
+        }
+        this.seedUploadSignaturesFromDisk();
       }
       this.data.syncEnabled = true;
       await this.fetchVaultMembers();
