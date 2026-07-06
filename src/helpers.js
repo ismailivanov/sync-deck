@@ -45,6 +45,7 @@ const DEFAULT_DATA = {
   billingEnabled: false,
   billingYearly: false,
   onboarded: false,
+  termsAcceptedVersion: "",
   storageBlocked: false,
   storageBlockedReason: "",
   vaultStats: {
