@@ -164,21 +164,31 @@ class UpgradeModal extends Modal {
     // Plan picker.
     const options = contentEl.createDiv({ cls: "sd-price-options" });
 
-    const monthly = options.createDiv({ cls: "sd-price-card is-active" });
+    const yearlyLive = !!this.plugin.data.billingYearly;
+
+    const monthly = options.createDiv({ cls: "sd-price-card" });
     monthly.createDiv({ cls: "sd-price-amount", text: "$4" });
     monthly.createDiv({ cls: "sd-price-period", text: "per month" });
-    const monthlyBtn = monthly.createEl("button", { text: "Continue to checkout", cls: "mod-cta sd-price-btn" });
+    const monthlyBtn = monthly.createEl("button", { text: "Choose monthly", cls: "sd-price-btn" });
     monthlyBtn.addEventListener("click", () => {
       this.close();
-      this.plugin.startUpgrade();
+      this.plugin.startUpgrade("monthly");
     });
 
-    const yearly = options.createDiv({ cls: "sd-price-card is-soon" });
-    yearly.createDiv({ cls: "sd-price-badge", text: "Coming soon" });
+    // Yearly is the better deal, so feature it when it's live.
+    const yearly = options.createDiv({ cls: `sd-price-card ${yearlyLive ? "is-active" : "is-soon"}` });
+    yearly.createDiv({ cls: "sd-price-badge", text: yearlyLive ? "Best value" : "Coming soon" });
     yearly.createDiv({ cls: "sd-price-amount", text: "$39" });
     yearly.createDiv({ cls: "sd-price-period", text: "per year · save 19%" });
-    const yearlyBtn = yearly.createEl("button", { text: "Coming soon", cls: "sd-price-btn" });
-    yearlyBtn.disabled = true;
+    const yearlyBtn = yearly.createEl("button", { text: yearlyLive ? "Choose yearly" : "Coming soon", cls: `${yearlyLive ? "mod-cta " : ""}sd-price-btn` });
+    if (yearlyLive) {
+      yearlyBtn.addEventListener("click", () => {
+        this.close();
+        this.plugin.startUpgrade("yearly");
+      });
+    } else {
+      yearlyBtn.disabled = true;
+    }
 
     contentEl.createEl("p", { cls: "sd-upgrade-foot", text: "Cancel anytime · Secure checkout by Stripe" });
   }
@@ -367,6 +377,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.fileLimitMb = Number(data.fileLimitMb) > 0 ? Number(data.fileLimitMb) : DEFAULT_DATA.fileLimitMb;
     data.boardLimit = data.boardLimit === null || Number.isFinite(Number(data.boardLimit)) ? data.boardLimit : DEFAULT_DATA.boardLimit;
     data.billingEnabled = !!data.billingEnabled;
+    data.billingYearly = !!data.billingYearly;
     data.storageBlocked = !!data.storageBlocked;
     data.storageBlockedReason = typeof data.storageBlockedReason === "string" ? data.storageBlockedReason : "";
     data.vaultList = Array.isArray(data.vaultList) ? data.vaultList : [];
@@ -740,6 +751,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
       if (me.usage && Number(me.usage.storageBytes) >= 0) this.data.storageUsedMb = Math.round(Number(me.usage.storageBytes) / 1024 / 1024);
       this.data.billingEnabled = !!me.billingEnabled;
+      this.data.billingYearly = !!me.billingYearly;
       await this.savePluginData();
       this.refreshViews();
     } catch (error) {
@@ -755,10 +767,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
   // Open Stripe Checkout for Sync Deck Pro in the browser. The server creates the
   // session; Stripe's webhook flips the plan to Pro on payment, and the next
   // /me / manifest poll refreshes the panel.
-  async startUpgrade() {
+  async startUpgrade(interval) {
     if (!this.data.signedIn) { new Notice("Sign in first."); return; }
     try {
-      const result = await this.api("/billing/checkout", { method: "POST" });
+      const result = await this.api("/billing/checkout", { method: "POST", body: { interval: interval === "yearly" ? "yearly" : "monthly" } });
       if (result && result.url) {
         window.open(result.url);
         new Notice("Opening secure checkout in your browser…");
@@ -1016,6 +1028,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (storage.boardLimit === null || Number.isFinite(Number(storage.boardLimit))) this.data.boardLimit = storage.boardLimit;
     if (Number(storage.fileBytes) > 0) this.data.fileLimitMb = Math.round(Number(storage.fileBytes) / 1024 / 1024);
     if (typeof storage.billingEnabled === "boolean") this.data.billingEnabled = storage.billingEnabled;
+    if (typeof storage.billingYearly === "boolean") this.data.billingYearly = storage.billingYearly;
     // Server confirms we're under quota -> lift any stale local block.
     if (this.data.storageBlocked && Number(storage.usedBytes) < Number(storage.limitBytes)) this.clearStorageBlock();
   }
