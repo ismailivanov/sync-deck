@@ -315,7 +315,7 @@ class SyncDeckView extends ItemView {
 
     // Upgrade CTA for Free users (only when billing is live on the server).
     if (!isPro && data.billingEnabled) {
-      const upgrade = textButton("sparkles", "Upgrade to Pro", () => this.plugin.startUpgrade());
+      const upgrade = textButton("sparkles", "Upgrade to Pro", () => this.plugin.openUpgradeModal());
       upgrade.classList.add("sd-upgrade-btn");
       wrap.append(upgrade);
     }
@@ -1037,6 +1037,68 @@ class InviteCodeModal extends Modal {
   }
 }
 
+// Free vs Pro comparison + plan picker. Monthly is live (Stripe checkout);
+// yearly is shown as "Coming soon" for now.
+class UpgradeModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("sd-upgrade-modal");
+
+    contentEl.createEl("h2", { text: "Sync Deck Pro" });
+    contentEl.createEl("p", { cls: "sd-upgrade-sub", text: "More space, bigger files, and unlimited boards." });
+
+    // Feature comparison (marketing copy — keep in sync with the server plan limits).
+    const features = [
+      { label: "Storage", free: "250 MB", pro: "5 GB" },
+      { label: "Max file size (images & video)", free: "10 MB", pro: "250 MB" },
+      { label: "Task Deck boards", free: "1", pro: "Unlimited" },
+      { label: "Real-time sync, presence, invites", free: "✓", pro: "✓" },
+    ];
+    const table = contentEl.createDiv({ cls: "sd-plan-compare" });
+    const head = table.createDiv({ cls: "sd-plan-row sd-plan-head" });
+    head.createDiv({ cls: "sd-plan-cell sd-plan-label", text: "" });
+    head.createDiv({ cls: "sd-plan-cell", text: "Free" });
+    head.createDiv({ cls: "sd-plan-cell sd-plan-pro", text: "Pro" });
+    features.forEach((f) => {
+      const row = table.createDiv({ cls: "sd-plan-row" });
+      row.createDiv({ cls: "sd-plan-cell sd-plan-label", text: f.label });
+      row.createDiv({ cls: "sd-plan-cell", text: f.free });
+      row.createDiv({ cls: "sd-plan-cell sd-plan-pro", text: f.pro });
+    });
+
+    // Plan picker.
+    const options = contentEl.createDiv({ cls: "sd-price-options" });
+
+    const monthly = options.createDiv({ cls: "sd-price-card is-active" });
+    monthly.createDiv({ cls: "sd-price-amount", text: "$4" });
+    monthly.createDiv({ cls: "sd-price-period", text: "per month" });
+    const monthlyBtn = monthly.createEl("button", { text: "Continue to checkout", cls: "mod-cta sd-price-btn" });
+    monthlyBtn.addEventListener("click", () => {
+      this.close();
+      this.plugin.startUpgrade();
+    });
+
+    const yearly = options.createDiv({ cls: "sd-price-card is-soon" });
+    yearly.createDiv({ cls: "sd-price-badge", text: "Coming soon" });
+    yearly.createDiv({ cls: "sd-price-amount", text: "$39" });
+    yearly.createDiv({ cls: "sd-price-period", text: "per year · save 19%" });
+    const yearlyBtn = yearly.createEl("button", { text: "Coming soon", cls: "sd-price-btn" });
+    yearlyBtn.disabled = true;
+
+    contentEl.createEl("p", { cls: "sd-upgrade-foot", text: "Cancel anytime · Secure checkout by Stripe" });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
@@ -1356,6 +1418,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
     } catch (error) {
       // non-fatal (offline / transient)
     }
+  }
+
+  // Show the Free vs Pro comparison + plan picker.
+  openUpgradeModal() {
+    new UpgradeModal(this.app, this).open();
   }
 
   // Open Stripe Checkout for Sync Deck Pro in the browser. The server creates the
