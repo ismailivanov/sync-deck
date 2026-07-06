@@ -1127,7 +1127,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
     const startedAt = Date.now();
     while (Date.now() - startedAt < 120000) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      const session = await this.api(`/auth/google/session/${encodeURIComponent(state)}`);
+      let session;
+      try {
+        session = await this.api(`/auth/google/session/${encodeURIComponent(state)}`);
+      } catch (error) {
+        continue; // transient (rate limit / network) — keep polling until timeout
+      }
       if (session.status === "complete") return session;
       if (session.status === "error") throw new Error(session.error || "Google sign in failed");
     }
@@ -2046,6 +2051,18 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async signOut() {
+    // Revoke the token server-side so a copy of it can never be reused. Offline
+    // is fine — we still clear it locally. Bounded so a stuck socket can't hang.
+    try {
+      if (this.data.authToken) {
+        await Promise.race([
+          this.api("/auth/signout", { method: "POST" }),
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ]);
+      }
+    } catch (error) {
+      // ignore; local sign-out proceeds regardless
+    }
     this.data.signedIn = false;
     this.data.syncEnabled = false;
     this.data.authToken = "";
