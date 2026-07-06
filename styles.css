@@ -451,3 +451,25 @@
   white-space: nowrap;
 }
 .sd-upgrade-foot { text-align: center; color: var(--text-muted); font-size: 12px; margin-top: 14px; margin-bottom: 0; }
+.sd-continue-free {
+  display: block;
+  margin: 12px auto 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sd-continue-free:hover { color: var(--text-normal); text-decoration: underline; }
+
+/* Footer */
+.sd-footer {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.sd-footer .sd-text-button { font-size: 12px; }

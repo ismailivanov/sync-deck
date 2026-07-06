@@ -43,6 +43,7 @@ const DEFAULT_DATA = {
   boardLimit: 1,
   billingEnabled: false,
   billingYearly: false,
+  onboarded: false,
   storageBlocked: false,
   storageBlockedReason: "",
   vaultStats: {
