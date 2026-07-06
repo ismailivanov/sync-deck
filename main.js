@@ -385,6 +385,9 @@ class SyncDeckView extends ItemView {
         row.append(main);
         const side = createElement("div", "sd-row-side");
         side.append(textButton("eye", "", () => this.plugin.inspectVault(v), "sd-icon-btn"));
+        if (!v.owner || v.owner === data.user.email) {
+          side.append(textButton("trash-2", "", () => this.plugin.deleteVault(v), "sd-icon-btn sd-danger"));
+        }
         side.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
         row.append(side);
         list.append(row);
@@ -1365,7 +1368,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
       : clone(DEFAULT_DATA.members);
     data.activity = Array.isArray(data.activity) ? data.activity : clone(DEFAULT_DATA.activity);
     data.deviceId = data.deviceId || uid("device");
-    data.vaultId = data.vaultId || uid("vault");
+    if (!data.vaultId) {
+      // Fresh install: name the first vault after the Obsidian vault instead of
+      // the legacy "Aircraft Team" placeholder, so vaults are distinguishable.
+      data.vaultId = uid("vault");
+      const vaultName = this.app && this.app.vault && this.app.vault.getName ? this.app.vault.getName() : "";
+      if (vaultName && (!data.workspace || data.workspace === "Aircraft Team")) data.workspace = vaultName;
+    }
     data.syncQueue = this.compactQueue(Array.isArray(data.syncQueue) ? data.syncQueue : []);
     data.recentFiles = Array.isArray(data.recentFiles) ? data.recentFiles.slice(0, 20) : [];
     data.remoteKnownPaths = Array.isArray(data.remoteKnownPaths) ? data.remoteKnownPaths : [];
@@ -1607,6 +1616,30 @@ module.exports = class SyncDeckPlugin extends Plugin {
   inspectVault(vault) {
     if (!vault || !vault.vaultId) return;
     new VaultInspectModal(this.app, this, vault).open();
+  }
+
+  // Permanently delete a vault you OWN (server-side, for everyone). Only offered
+  // for non-active vaults, so you never delete the one you're currently on.
+  async deleteVault(vault) {
+    if (!this.data.signedIn || !vault || !vault.vaultId) return;
+    if (vault.vaultId === this.data.vaultId) { new Notice("Switch to another vault before deleting this one."); return; }
+    if (vault.owner && vault.owner !== this.data.user.email) { new Notice("Only the owner can delete a vault."); return; }
+    const name = vault.workspace || "this vault";
+    const confirmed = await new ConfirmModal(this.app, {
+      title: `Delete ${name}?`,
+      body: `This permanently deletes ${name} and all of its synced files from the server, for everyone. Members lose access and it can't be undone. Your local files are not touched.`,
+      confirmText: "Delete vault",
+      danger: true,
+    }).openAndWait();
+    if (!confirmed) return;
+    try {
+      await this.api(`/vaults/${encodeURIComponent(vault.vaultId)}/delete`, { method: "POST" });
+      await this.fetchVaultList();
+      this.refreshViews();
+      new Notice(`Deleted ${name}.`);
+    } catch (error) {
+      new Notice(`Could not delete: ${error.message}`);
+    }
   }
 
   // The vaults this user can access (owned + joined), for the switchable list.
