@@ -36,6 +36,7 @@ const DEFAULT_DATA = {
   syncProgress: 0,
   remoteUpdatedAt: "",
   lastSync: "",
+  vaultInitialized: false,
   storageUsedMb: 0,
   storageLimitMb: 250,
   fileLimitMb: 10,

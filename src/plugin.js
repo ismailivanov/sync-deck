@@ -293,6 +293,46 @@ class TextPromptModal extends Modal {
   }
 }
 
+// Pick one of N choices. Resolves the chosen key, or null on cancel/close.
+class ChoiceModal extends Modal {
+  constructor(app, opts) {
+    super(app);
+    this.opts = opts || {};
+    this.resolve = null;
+  }
+
+  openAndWait() {
+    return new Promise((resolve) => { this.resolve = resolve; this.open(); });
+  }
+
+  finish(value) {
+    const resolve = this.resolve;
+    this.resolve = null;
+    this.close();
+    if (resolve) resolve(value);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("sd-choice-modal");
+    contentEl.createEl("h2", { text: this.opts.title || "Choose" });
+    if (this.opts.body) contentEl.createEl("p", { text: this.opts.body });
+    const actions = contentEl.createDiv({ cls: "sd-modal-actions" });
+    (this.opts.choices || []).forEach((c) => {
+      const btn = actions.createEl("button", { text: c.label });
+      if (c.cta) btn.addClass("mod-cta");
+      btn.addEventListener("click", () => this.finish(c.key));
+    });
+    window.setTimeout(() => { const b = actions.querySelector("button.mod-cta") || actions.querySelector("button"); if (b) b.focus(); }, 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (this.resolve) this.finish(null);
+  }
+}
+
 // Read-only view of a vault's synced items. Fetches the vault manifest (any
 // member may read it) and lists the files compactly — without switching to it.
 class VaultInspectModal extends Modal {
@@ -434,6 +474,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.billingEnabled = !!data.billingEnabled;
     data.billingYearly = !!data.billingYearly;
     data.onboarded = !!data.onboarded;
+    // "First-sync choice made for the active vault." Grandfather anyone who has
+    // already synced (lastSync set) so the upgrade never re-prompts them.
+    data.vaultInitialized = !!data.vaultInitialized || !!data.lastSync;
     data.storageBlocked = !!data.storageBlocked;
     data.storageBlockedReason = typeof data.storageBlockedReason === "string" ? data.storageBlockedReason : "";
     data.vaultList = Array.isArray(data.vaultList) ? data.vaultList : [];
@@ -571,6 +614,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.role = "Admin";
     this.data.members = [];
     this.data.vaultOwner = this.data.user.email || "";
+    this.data.vaultInitialized = false; // detached to a fresh vault — ask on first sync
     this.data.remoteKnownPaths = [];
     this.data.remoteKnownVaultId = "";
     this.data.pendingDeletes = [];
@@ -631,20 +675,82 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }
   }
 
-  // Create a fresh EMPTY vault and switch to it. Reuses the switch flow: the
-  // current vault's synced files go to trash (recoverable, still safe on the
-  // server) and the new vault opens blank. Registering it on first sync creates
-  // it server-side owned by you.
+  // The local files that WOULD sync (not ignored, under the per-file cap).
+  collectSyncableFiles() {
+    const out = [];
+    for (const file of this.app.vault.getFiles()) {
+      if (!file || isIgnoredPath(file.path)) continue;
+      if ((file.stat.size || 0) > this.fileLimitBytes()) continue;
+      out.push(file);
+    }
+    return out;
+  }
+
+  // When starting a vault, ask whether to seed it with the existing local files
+  // or start empty. Returns "add" | "empty" | null (cancelled). No local files =>
+  // "empty" with no prompt.
+  async promptIncludeLocalFiles(vaultName) {
+    const count = this.collectSyncableFiles().length;
+    if (count === 0) return "empty";
+    return new ChoiceModal(this.app, {
+      title: `Set up ${vaultName || "your vault"}`,
+      body: `You have ${count} file${count === 1 ? "" : "s"} in this Obsidian vault. Add them to this vault now, or start empty and sync only what you add from here on?`,
+      choices: [
+        { key: "add", label: `Add my ${count} file${count === 1 ? "" : "s"}`, cta: true },
+        { key: "empty", label: "Start empty" },
+      ],
+    }).openAndWait();
+  }
+
+  // Create a new vault and switch to it. Asks whether to include the current
+  // local files (upload them) or start empty (keep them local, don't upload).
+  // Never trashes local files.
   async createNewVault() {
     if (!this.data.signedIn) { new Notice("Sign in first."); return; }
+    if (this.switchingVault) return;
     const name = await new TextPromptModal(this.app, {
       title: "Create a vault",
-      body: "A new empty vault opens on this device. Your current vault's synced files move to trash (recoverable) and stay safe on the server — switch back any time.",
       placeholder: "Vault name",
-      confirmText: "Create vault",
+      confirmText: "Next",
     }).openAndWait();
     if (!name) return;
-    await this.switchToVault({ vaultId: uid("vault"), workspace: name, owner: this.data.user.email, role: "Admin", isNew: true });
+    const choice = await this.promptIncludeLocalFiles(name);
+    if (choice === null) return; // cancelled
+
+    this.switchingVault = true;
+    try {
+      this.data.syncEnabled = false;
+      // Let any in-flight background sync finish before we swap the vault id.
+      let waited = 0;
+      while ((this.remotePullRunning || this.autoSyncRunning) && waited < 5000) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        waited += 50;
+      }
+      // Fresh vault, local files KEPT (no trash). detachToEmptyVault clears every
+      // baseline; we then set the chosen name.
+      this.detachToEmptyVault();
+      this.data.workspace = name;
+      this.data.lastSync = "";
+      this.data.vaultInitialized = true; // the include-files choice is made here
+      await this.savePluginData();
+      await this.registerVault();
+      if (choice === "add") {
+        await this.scanVault({ upload: true }); // seed the vault with local files
+      } else {
+        this.seedUploadSignaturesFromDisk(); // keep files local; don't upload them
+      }
+      this.data.syncEnabled = true;
+      await this.fetchVaultMembers();
+      await this.fetchPlan();
+      new Notice(choice === "add" ? `Created "${name}" with your files. Sync is on.` : `Created "${name}" (empty). Sync is on.`);
+    } catch (error) {
+      new Notice(`Could not create the vault: ${error.message}`);
+    } finally {
+      this.switchingVault = false;
+      await this.savePluginData();
+      await this.fetchVaultList();
+      this.refreshViews();
+    }
   }
 
   // Open a read-only inspector for any vault the user can access.
@@ -686,6 +792,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.syncEnabled = false;
     this.data.syncProgress = 0;
     this.data.vaultStats.syncedFiles = 0;
+    this.data.lastSync = "";
+    this.data.vaultInitialized = false; // a fresh vault — ask again on first sync
     this.data.vaultId = uid("vault");
     this.data.workspace = (this.app.vault.getName && this.app.vault.getName()) || "My vault";
     this.data.role = "Admin";
@@ -834,6 +942,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.workspace = target.workspace || this.data.workspace;
       this.data.role = target.role || "Worker";
       this.data.vaultOwner = target.owner || "";
+      this.data.vaultInitialized = true; // switching to an existing, set-up vault
       this.data.members = [];
       this.data.remoteKnownPaths = [];
       this.data.remoteKnownVaultId = "";
@@ -1817,6 +1926,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (previousEmail && previousEmail !== this.data.user.email && !DEMO_MEMBER_EMAILS.has(previousEmail)) {
         this.data.vaultId = uid("vault");
         this.data.syncEnabled = false;
+        this.data.vaultInitialized = false;
       }
       this.data.workspace = this.data.user.workspace || this.data.workspace;
       this.data.role = this.data.user.role || this.data.role;
@@ -1829,6 +1939,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
         if (error.status !== 403) throw error;
         this.data.vaultId = uid("vault");
         this.data.syncEnabled = false;
+        this.data.vaultInitialized = false;
         await this.registerVault();
       }
       await this.fetchVaultMembers();
@@ -1869,11 +1980,29 @@ module.exports = class SyncDeckPlugin extends Plugin {
       return;
     }
 
-    this.data.syncEnabled = !this.data.syncEnabled;
-    if (this.data.syncEnabled) {
+    if (!this.data.syncEnabled) {
+      // Enabling. On the FIRST-EVER sync of this vault, ask whether to include the
+      // existing local files rather than silently uploading the whole vault.
+      if (!this.data.vaultInitialized) {
+        const choice = await this.promptIncludeLocalFiles(this.data.workspace);
+        if (choice === null) return; // cancelled — stay paused
+        this.data.syncEnabled = true;
+        this.data.vaultInitialized = true; // choice made; don't re-ask on resume
+        if (choice === "empty") {
+          this.seedUploadSignaturesFromDisk();
+          await this.savePluginData();
+          try { await this.registerVault(); } catch (error) { /* loops will retry */ }
+          this.refreshViews();
+          new Notice("Vault sync started (empty).");
+          return;
+        }
+      } else {
+        this.data.syncEnabled = true;
+      }
       const synced = await this.scanVault({ upload: true });
       new Notice(synced ? "Vault sync started." : "Vault sync failed.");
     } else {
+      this.data.syncEnabled = false;
       await this.savePluginData();
       new Notice("Vault sync paused.");
     }
@@ -1932,6 +2061,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.workspace = result.workspace || this.data.workspace;
       this.data.role = result.role || "Worker";
       this.data.vaultOwner = result.owner || this.data.vaultOwner || "";
+      this.data.vaultInitialized = true; // joined an existing, set-up vault
       this.data.members = Array.isArray(result.members) ? result.members : this.data.members;
       // Joining a vault means "sync me", with no extra step. Start from a clean
       // baseline: this is a fresh vault association, so any known-set / delete
