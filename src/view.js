@@ -155,7 +155,7 @@ class SyncDeckView extends ItemView {
 
     // Upgrade CTA for Free users (only when billing is live on the server).
     if (!isPro && data.billingEnabled) {
-      const upgrade = textButton("sparkles", "Upgrade to Pro", () => this.plugin.startUpgrade());
+      const upgrade = textButton("sparkles", "Upgrade to Pro", () => this.plugin.openUpgradeModal());
       upgrade.classList.add("sd-upgrade-btn");
       wrap.append(upgrade);
     }
