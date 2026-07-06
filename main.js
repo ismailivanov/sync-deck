@@ -167,7 +167,6 @@ const {
   formatBytes,
   iconBadge,
   initials,
-  percent,
   textButton,
 } = __require("src/helpers.js");
 
@@ -210,288 +209,277 @@ class SyncDeckView extends ItemView {
     this.contentEl.replaceChildren();
     this.contentEl.addClass("sd-root");
 
-    const toolbar = createElement("div", "sd-toolbar");
-    const title = createElement("div", "sd-toolbar-title");
-    title.append(createElement("h2", "", "Sync Deck"));
-    title.append(this.statusPill(data.serverStatus === "online" ? "API online" : "API offline", data.serverStatus === "online" ? "good" : "muted"));
-    if (data.signedIn) title.append(this.avatar(data.user, "sd-profile-avatar"));
-
-    const actions = createElement("div", "sd-toolbar-actions");
-    actions.append(
-      textButton(data.signedIn ? "log-out" : "log-in", data.signedIn ? "Sign out" : "Continue with Google", () => {
-        if (data.signedIn) this.plugin.signOut();
-        else this.plugin.signIn();
-      }, data.signedIn ? "" : "mod-cta"),
-      textButton("refresh-cw", data.syncEnabled ? "Pause sync" : "Start sync", () => this.plugin.toggleSync())
-    );
-    toolbar.append(title, actions);
-
-    const layout = createElement("div", "sd-layout");
-    layout.append(this.renderVaultsPanel(), this.renderSyncPanel(), this.renderMembersPanel(), this.renderActivityPanel());
-    this.contentEl.append(toolbar, layout);
-  }
-
-  renderVaultsPanel() {
-    const data = this.plugin.data;
-    const panel = this.panel("Vaults", "layers", "sd-panel-vaults");
+    const shell = createElement("div", "sd-shell");
+    shell.append(this.renderHeader());
 
     if (!data.signedIn) {
-      const empty = createElement("div", "sd-empty-state");
-      empty.append(
-        createElement("strong", "", "Sign in to see your vaults"),
-        createElement("span", "", "Your synced vaults appear here once you sign in.")
+      shell.append(this.renderSignedOut());
+    } else {
+      shell.append(
+        this.renderActiveVaultCard(),
+        this.renderOtherVaults(),
+        this.renderPeople(),
+        this.renderActivity()
       );
-      panel.append(empty);
-      return panel;
     }
 
-    // Merge the server list with the active vault so the active one always shows,
-    // even if the server hid it (e.g. a brand-new empty personal vault).
-    const list = Array.isArray(data.vaultList) ? data.vaultList.slice() : [];
-    if (!list.some((v) => v.vaultId === data.vaultId)) {
-      list.unshift({
-        vaultId: data.vaultId,
-        workspace: data.workspace || "Current vault",
-        owner: data.vaultOwner || "",
-        role: data.role || "Admin",
-        fileCount: data.vaultStats.syncedFiles || 0,
-        sizeBytes: Math.round((data.storageUsedMb || 0) * 1024 * 1024),
-        memberCount: (data.members || []).length,
-      });
-    }
-    // Active first, then most-recently-updated.
-    list.sort((a, b) => (a.vaultId === data.vaultId ? -1 : b.vaultId === data.vaultId ? 1 : 0));
-
-    const container = createElement("div", "sd-vault-list");
-    list.forEach((v) => {
-      const isActive = v.vaultId === data.vaultId;
-      const row = createElement("div", `sd-vault-row${isActive ? " is-active" : ""}`);
-
-      const main = createElement("div", "sd-vault-main");
-      const nameLine = createElement("div", "sd-vault-nameline");
-      nameLine.append(createElement("strong", "", v.workspace || "Vault"));
-      if (isActive) nameLine.append(createElement("span", "sd-vault-badge", "Active"));
-      main.append(nameLine);
-      const files = v.fileCount || 0;
-      const meta = `${v.role || "Worker"} · ${files} file${files === 1 ? "" : "s"} · ${formatBytes(v.sizeBytes || 0)}`;
-      main.append(createElement("span", "sd-vault-meta", meta));
-      row.append(main);
-
-      if (!isActive) {
-        row.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
-      }
-      container.append(row);
-    });
-
-    panel.append(container);
-    panel.append(createElement("p", "sd-vault-hint", "Switching moves the current vault's synced files to trash, then pulls the chosen one — so vaults never mix."));
-    const actions = createElement("div", "sd-panel-actions");
-    actions.append(textButton("refresh-cw", "Refresh", () => this.plugin.fetchVaultList()));
-    panel.append(actions);
-    return panel;
+    this.contentEl.append(shell);
   }
 
-  statusPill(text, tone) {
-    return createElement("span", `sd-status-pill is-${tone}`, text);
-  }
-
-  renderSyncPanel() {
+  // ---- Header ---------------------------------------------------------------
+  renderHeader() {
     const data = this.plugin.data;
-    const stats = data.vaultStats;
-    const panel = this.panel("Vault Sync", "cloud", "sd-panel-sync");
-    const hasSyncedFiles = (stats.syncedFiles || 0) > 0;
-    const progressLabel = data.syncEnabled || hasSyncedFiles ? percent(data.syncProgress) : "Ready";
-    const progressWidth = data.syncEnabled || hasSyncedFiles ? percent(data.syncProgress) : "0%";
-    const statusText = data.syncEnabled
-      ? `${stats.syncedFiles || 0} / ${stats.syncableFiles} files synced`
-      : `${stats.syncableFiles} files ready to sync`;
-    const progress = createElement("div", "sd-progress");
-    const fill = createElement("div", "sd-progress-fill");
-    fill.style.width = progressWidth;
-    progress.append(fill);
+    const header = createElement("div", "sd-header");
 
-    const status = createElement("div", "sd-sync-status");
-    status.append(
-      createElement("strong", "", progressLabel),
-      createElement("span", "", statusText)
-    );
+    const brand = createElement("div", "sd-brand");
+    brand.append(createElement("span", "sd-brand-name", "Sync Deck"));
+    const online = data.serverStatus === "online";
+    const status = createElement("span", `sd-online is-${online ? "on" : "off"}`);
+    status.append(createElement("span", "sd-online-dot"), createElement("span", "", online ? "Online" : "Offline"));
+    brand.append(status);
+    header.append(brand);
 
-    const rules = createElement("div", "sd-rule-list");
-    [
-      `${stats.syncableFiles} files`,
-      formatBytes(stats.syncableBytes),
-      `${stats.syncedFiles || 0} synced`,
-      data.lastSync ? `Last sync ${data.lastSync}` : "Not synced yet",
-    ].forEach((item) => {
-      rules.append(this.rule(item));
-    });
-
-    const actions = createElement("div", "sd-panel-actions");
-    actions.append(
-      textButton("scan-line", "Scan now", () => this.plugin.finishScan()),
-      textButton("cloud-download", "Pull latest", () => this.plugin.pullLatest()),
-      textButton("user-plus", "Invite", () => this.plugin.createInvite()),
-      textButton("key-round", "Join", () => this.plugin.joinInvite())
-    );
-
-    panel.append(status, progress, rules, this.renderStorageSection(), actions);
-    return panel;
+    const account = createElement("div", "sd-account");
+    if (data.signedIn) {
+      account.append(this.avatar(data.user, "sd-account-avatar"));
+      account.append(textButton("log-out", "Sign out", () => this.plugin.signOut(), "sd-ghost-btn"));
+    }
+    header.append(account);
+    return header;
   }
 
-  renderStorageSection() {
+  renderSignedOut() {
+    const wrap = createElement("div", "sd-card sd-signedout");
+    wrap.append(createElement("h3", "sd-signedout-title", "Sync your vault, everywhere"));
+    wrap.append(createElement(
+      "p",
+      "sd-signedout-copy",
+      "Sign in to sync this vault across your devices and with your team — with live presence, invites, and roles."
+    ));
+    wrap.append(textButton("log-in", "Continue with Google", () => this.plugin.signIn(), "sd-primary-btn sd-block-btn"));
+    return wrap;
+  }
+
+  // ---- Active vault ---------------------------------------------------------
+  syncState() {
+    const d = this.plugin.data;
+    if (d.storageBlocked) return { label: "Sync paused — storage full", tone: "danger" };
+    if (!d.syncEnabled) return { label: "Sync paused", tone: "muted" };
+    const p = Math.round(d.syncProgress || 0);
+    if (p > 0 && p < 100) return { label: `Syncing… ${p}%`, tone: "accent", progress: p };
+    return { label: d.lastSync ? "Up to date" : "Ready to sync", tone: "good" };
+  }
+
+  renderActiveVaultCard() {
+    const data = this.plugin.data;
+    const card = createElement("div", "sd-card sd-vault-card");
+
+    // Name row + rename.
+    const head = createElement("div", "sd-vc-head");
+    const nameWrap = createElement("div", "sd-vc-name");
+    nameWrap.append(iconBadge("folder", "Vault"));
+    nameWrap.append(createElement("strong", "", data.workspace || "My vault"));
+    const isPro = data.plan === "pro";
+    nameWrap.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
+    head.append(nameWrap);
+    if ((data.role || "") === "Admin") {
+      head.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
+    }
+    card.append(head);
+
+    // Role · files · size (from the server vault list when available).
+    const active = (data.vaultList || []).find((v) => v.vaultId === data.vaultId);
+    const files = active ? active.fileCount : (data.vaultStats.syncableFiles || 0);
+    const sizeBytes = active ? active.sizeBytes : (data.vaultStats.syncableBytes || 0);
+    card.append(createElement(
+      "div",
+      "sd-vc-meta",
+      `${data.role || "Worker"} · ${files} file${files === 1 ? "" : "s"} · ${formatBytes(sizeBytes || 0)}`
+    ));
+
+    card.append(this.renderStorage());
+    card.append(this.renderSyncRow());
+
+    // Actions — primary adapts to whether sync is on.
+    const actions = createElement("div", "sd-vc-actions");
+    if (data.syncEnabled) {
+      actions.append(textButton("refresh-cw", "Sync now", () => this.plugin.finishScan(), "sd-primary-btn sd-grow"));
+      actions.append(textButton("cloud-download", "Pull", () => this.plugin.pullLatest()));
+      actions.append(textButton("pause", "Pause", () => this.plugin.toggleSync()));
+    } else {
+      actions.append(textButton("play", "Resume sync", () => this.plugin.toggleSync(), "sd-primary-btn sd-grow"));
+      actions.append(textButton("cloud-download", "Pull", () => this.plugin.pullLatest()));
+    }
+    card.append(actions);
+
+    if (!isPro && data.billingEnabled) {
+      card.append(textButton("sparkles", "Upgrade to Pro", () => this.plugin.openUpgradeModal(), "sd-upgrade-btn sd-block-btn"));
+    }
+    return card;
+  }
+
+  renderStorage() {
     const data = this.plugin.data;
     const used = Math.max(0, Number(data.storageUsedMb) || 0);
     const limit = Number(data.storageLimitMb) > 0 ? Number(data.storageLimitMb) : 250;
     const fileMb = Number(data.fileLimitMb) > 0 ? Number(data.fileLimitMb) : 10;
     const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
-    const pct = Math.round(ratio * 100);
-    const isPro = data.plan === "pro";
 
     const wrap = createElement("div", "sd-storage");
     const head = createElement("div", "sd-storage-head");
-    head.append(createElement("span", "sd-storage-label", "Storage"));
-    head.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
+    head.append(createElement("span", "", "Storage"));
+    head.append(createElement("span", "sd-storage-num", `${used} of ${limit} MB`));
     wrap.append(head);
 
-    const bar = createElement("div", "sd-storage-bar");
-    const fill = createElement("div", "sd-storage-fill");
-    fill.style.width = `${pct}%`;
+    const bar = createElement("div", "sd-bar");
+    const fill = createElement("div", "sd-bar-fill");
+    fill.style.width = `${Math.round(ratio * 100)}%`;
     if (ratio >= 0.9) fill.classList.add("is-full");
-    else if (ratio >= 0.7) fill.classList.add("is-warn");
+    else if (ratio >= 0.75) fill.classList.add("is-warn");
     bar.append(fill);
     wrap.append(bar);
-
-    wrap.append(createElement("div", "sd-storage-meta", `${used} MB of ${limit} MB used · ${fileMb} MB/file`));
 
     if (data.storageBlocked) {
       wrap.append(createElement(
         "div",
         "sd-storage-warn",
         data.storageBlockedReason === "server_full"
-          ? "Sync paused — the server is temporarily full. Your changes are safe locally and will upload later."
-          : "Sync paused — storage limit reached. Free up space or upgrade to Pro to keep syncing."
+          ? "The server is temporarily full. Your changes are safe locally and upload later."
+          : "Storage full. Free up space or upgrade to Pro to keep syncing."
       ));
-    } else if (!isPro && ratio >= 0.8) {
-      wrap.append(createElement("div", "sd-storage-hint", "Almost full — upgrade to Pro for more space."));
-    }
-
-    // Upgrade CTA for Free users (only when billing is live on the server).
-    if (!isPro && data.billingEnabled) {
-      const upgrade = textButton("sparkles", "Upgrade to Pro", () => this.plugin.openUpgradeModal());
-      upgrade.classList.add("sd-upgrade-btn");
-      wrap.append(upgrade);
+    } else {
+      wrap.append(createElement("div", "sd-storage-sub", `${fileMb} MB per file on ${data.plan === "pro" ? "Pro" : "Free"}`));
     }
     return wrap;
   }
 
-  renderActivityPanel() {
-    const panel = this.panel("Recent Activity", "radio", "sd-panel-activity");
-    const list = createElement("div", "sd-activity-list");
-    const queue = this.plugin.data.syncQueue || [];
-
-    if (!queue.length) {
-      const empty = createElement("div", "sd-empty-state");
-      empty.append(createElement("strong", "", "No queued changes"), createElement("span", "", "Run a scan or edit a file while sync is active."));
-      panel.append(empty);
-      return panel;
+  renderSyncRow() {
+    const state = this.syncState();
+    const row = createElement("div", `sd-sync-row is-${state.tone}`);
+    row.append(createElement("span", "sd-sync-dot"));
+    row.append(createElement("strong", "", state.label));
+    if (this.plugin.data.lastSync && state.tone !== "accent") {
+      row.append(createElement("span", "sd-sync-time", `· last sync ${this.plugin.data.lastSync}`));
     }
-
-    queue.slice(0, 6).forEach((item) => {
-      const row = createElement("div", "sd-activity-row");
-      const marker = createElement("span", "sd-cursor-marker");
-      marker.style.backgroundColor = item.status === "done" ? "#22c55e" : "#8b5cf6";
-      const copy = createElement("div", "sd-activity-copy");
-      const meta = `${item.action} - ${item.status} - ${item.time}`;
-      copy.append(createElement("strong", "", item.path), createElement("span", "", meta));
-      row.append(marker, copy);
-      list.append(row);
-    });
-
-    panel.append(list);
-    return panel;
+    return row;
   }
 
-  renderMembersPanel() {
+  // ---- Other vaults (switcher) ---------------------------------------------
+  renderOtherVaults() {
     const data = this.plugin.data;
-    const panel = this.panel("Vault Members", "users", "sd-panel-members");
+    const others = (Array.isArray(data.vaultList) ? data.vaultList : []).filter((v) => v.vaultId !== data.vaultId);
+    if (!others.length) return createElement("div", "sd-hidden");
 
-    if (!data.signedIn) {
-      const empty = createElement("div", "sd-empty-state");
-      empty.append(
-        createElement("strong", "", "Sign in to see members"),
-        createElement("span", "", "Members appear once you sign in and join or create a vault.")
-      );
-      panel.append(empty);
-      return panel;
-    }
-
-    const isAdmin = (data.role || "") === "Admin";
-    panel.append(createElement(
-      "p",
-      "sd-members-note",
-      isAdmin
-        ? "You are an Admin. You can invite people and remove members."
-        : "You are a Worker. You can sync this vault and see everyone in it."
-    ));
-
-    const members = Array.isArray(data.members) ? data.members : [];
-    if (!members.length) {
-      const empty = createElement("div", "sd-empty-state");
-      empty.append(
-        createElement("strong", "", "No members yet"),
-        createElement("span", "", "Use Invite to share a code, or Join to enter a vault.")
-      );
-      panel.append(empty);
-      return panel;
-    }
-
-    const list = createElement("div", "sd-member-list");
-    members.forEach((member) => {
-      const row = createElement("div", "sd-member-row");
-
-      const main = createElement("div", "sd-member-main");
-      main.append(this.avatar(member, "sd-member-avatar"));
-      const info = createElement("div", "sd-member-info");
-      const isYou = member.email === data.user.email;
-      info.append(createElement("strong", "", (member.name || member.email) + (isYou ? " (you)" : "")));
-      info.append(createElement("span", "sd-member-email", member.email));
-      main.append(info);
-
-      const side = createElement("div", "sd-member-side");
-      const role = member.role === "Admin" ? "Admin" : "Worker";
-      side.append(createElement("span", `sd-role-badge is-${role.toLowerCase()}`, role));
-
-      const isOwner = data.vaultOwner && member.email === data.vaultOwner;
-      if (isAdmin && !isOwner && !isYou) {
-        side.append(textButton("user-minus", "Remove", () => this.confirmRemoveMember(member), "sd-member-remove"));
-      }
-
-      row.append(main, side);
+    const section = this.section(`Other vaults`, others.length);
+    const list = createElement("div", "sd-rows");
+    others.forEach((v) => {
+      const row = createElement("div", "sd-row");
+      const main = createElement("div", "sd-row-main");
+      main.append(createElement("strong", "", v.workspace || "Vault"));
+      const files = v.fileCount || 0;
+      main.append(createElement("span", "sd-row-sub", `${v.role || "Worker"} · ${files ? `${files} file${files === 1 ? "" : "s"} · ${formatBytes(v.sizeBytes || 0)}` : "empty"}`));
+      row.append(main);
+      row.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
       list.append(row);
     });
+    section.append(list);
+    section.append(createElement("p", "sd-hint", "Switching moves the current vault's synced files to trash, then pulls the chosen one — so vaults never mix."));
+    return section;
+  }
 
-    panel.append(list);
-    return panel;
+  // ---- People ---------------------------------------------------------------
+  renderPeople() {
+    const data = this.plugin.data;
+    const members = Array.isArray(data.members) ? data.members : [];
+    const isAdmin = (data.role || "") === "Admin";
+    const section = this.section("People", members.length || null);
+
+    if (!members.length) {
+      section.append(this.emptyState("No one here yet", "Invite a teammate with a code, or join a vault someone shared with you."));
+    } else {
+      const list = createElement("div", "sd-rows");
+      members.forEach((member) => {
+        const row = createElement("div", "sd-row sd-member");
+        const main = createElement("div", "sd-row-main sd-member-main");
+        main.append(this.avatar(member, "sd-member-avatar"));
+        const info = createElement("div", "sd-member-info");
+        const isYou = member.email === data.user.email;
+        info.append(createElement("strong", "", (member.name || member.email) + (isYou ? " (you)" : "")));
+        info.append(createElement("span", "sd-row-sub", member.email));
+        main.append(info);
+        row.append(main);
+
+        const side = createElement("div", "sd-member-side");
+        const role = member.role === "Admin" ? "Admin" : "Worker";
+        side.append(createElement("span", `sd-role-badge is-${role.toLowerCase()}`, role));
+        const isOwner = data.vaultOwner && member.email === data.vaultOwner;
+        if (isAdmin && !isOwner && !isYou) {
+          side.append(textButton("user-minus", "", () => this.confirmRemoveMember(member), "sd-icon-btn sd-danger"));
+        }
+        row.append(side);
+        list.append(row);
+      });
+      section.append(list);
+    }
+
+    const actions = createElement("div", "sd-actions-row");
+    actions.append(textButton("user-plus", "Invite people", () => this.plugin.createInvite(), "sd-grow"));
+    actions.append(textButton("key-round", "Join a vault", () => this.plugin.joinInvite(), "sd-grow"));
+    section.append(actions);
+    return section;
+  }
+
+  // ---- Activity -------------------------------------------------------------
+  renderActivity() {
+    const queue = this.plugin.data.syncQueue || [];
+    const section = this.section("Recent activity", null);
+    if (!queue.length) {
+      section.append(this.emptyState("Nothing yet", "Edits and syncs show up here while sync is on."));
+      return section;
+    }
+    const list = createElement("div", "sd-activity");
+    queue.slice(0, 5).forEach((item) => {
+      const row = createElement("div", "sd-activity-row");
+      const dot = createElement("span", `sd-act-dot is-${item.status === "done" ? "done" : "pending"}`);
+      row.append(dot);
+      row.append(createElement("span", "sd-act-label", `${this.actionLabel(item.action)} ${item.path}`.trim()));
+      row.append(createElement("span", "sd-act-time", item.time || ""));
+      list.append(row);
+    });
+    section.append(list);
+    return section;
+  }
+
+  actionLabel(action) {
+    const map = { upload: "Uploaded", pull: "Pulled", scan: "Scanned", skip: "Skipped", delete: "Deleted", retry: "Retrying" };
+    return map[action] || action || "";
   }
 
   confirmRemoveMember(member) {
     const name = member.name || member.email;
-    const confirmed = window.confirm(`Remove ${name} from this vault?\n\nThey will lose sync access and the vault will disappear from their Sync Deck. They can rejoin only with a new invite.`);
+    const confirmed = window.confirm(`Remove ${name} from this vault?\n\nThey lose sync access and the vault disappears from their Sync Deck. They can rejoin only with a new invite.`);
     if (confirmed) this.plugin.removeVaultMember(member.email);
   }
 
-  panel(title, icon, variant = "") {
-    const panel = createElement("section", `sd-panel ${variant}`.trim());
-    const header = createElement("div", "sd-panel-header");
-    header.append(createElement("h3", "", title), iconBadge(icon, title));
-    panel.append(header);
-    return panel;
+  // ---- Small building blocks ------------------------------------------------
+  section(title, count) {
+    const section = createElement("section", "sd-section");
+    const header = createElement("div", "sd-section-title");
+    header.append(createElement("span", "", title));
+    if (count) header.append(createElement("span", "sd-section-count", String(count)));
+    section.append(header);
+    return section;
+  }
+
+  emptyState(title, sub) {
+    const empty = createElement("div", "sd-empty");
+    empty.append(createElement("strong", "", title), createElement("span", "", sub));
+    return empty;
   }
 
   avatar(person, className = "sd-avatar") {
     const avatar = createElement("span", className);
     avatar.style.backgroundColor = person.color || "#8b5cf6";
-
     if (person.picture) {
       const image = document.createElement("img");
       image.src = person.picture;
@@ -500,14 +488,7 @@ class SyncDeckView extends ItemView {
     } else {
       avatar.textContent = initials(person.name || person.email);
     }
-
     return avatar;
-  }
-
-  rule(text) {
-    const item = createElement("span", "sd-rule");
-    item.append(createElement("span", "sd-rule-dot"), createElement("span", "", text));
-    return item;
   }
 }
 
@@ -1204,6 +1185,54 @@ class ConfirmModal extends Modal {
   }
 }
 
+// Single-line text prompt. Resolves the trimmed string, or null on cancel/empty.
+class TextPromptModal extends Modal {
+  constructor(app, opts) {
+    super(app);
+    this.opts = opts || {};
+    this.resolve = null;
+  }
+
+  openAndWait() {
+    return new Promise((resolve) => { this.resolve = resolve; this.open(); });
+  }
+
+  finish(value) {
+    const resolve = this.resolve;
+    this.resolve = null;
+    this.close();
+    if (resolve) resolve(value);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("sd-prompt-modal");
+    contentEl.createEl("h2", { text: this.opts.title || "Enter a value" });
+    if (this.opts.body) contentEl.createEl("p", { text: this.opts.body });
+    const input = contentEl.createEl("input", { attr: { type: "text", placeholder: this.opts.placeholder || "", spellcheck: "false" } });
+    input.addClass("sd-code-input");
+    input.value = this.opts.value || "";
+    const actions = contentEl.createDiv({ cls: "sd-modal-actions" });
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const ok = actions.createEl("button", { text: this.opts.confirmText || "Save" });
+    ok.addClass("mod-cta");
+    const submit = () => this.finish(input.value.trim() || null);
+    cancel.addEventListener("click", () => this.finish(null));
+    ok.addEventListener("click", submit);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submit();
+      if (event.key === "Escape") this.finish(null);
+    });
+    window.setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (this.resolve) this.finish(null);
+  }
+}
+
 module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
@@ -1463,6 +1492,29 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (folder instanceof TFolder && folder.children.length === 0) {
         try { await this.app.vault.trash(folder, false); } catch (error) { /* skip */ }
       }
+    }
+  }
+
+  // Rename the active vault (admin only) so vaults are distinguishable.
+  async renameActiveVault() {
+    if (!this.data.signedIn || !this.data.vaultId) return;
+    if ((this.data.role || "") !== "Admin") { new Notice("Only an admin can rename this vault."); return; }
+    const name = await new TextPromptModal(this.app, {
+      title: "Rename vault",
+      placeholder: "Vault name",
+      value: this.data.workspace || "",
+      confirmText: "Save",
+    }).openAndWait();
+    if (!name || name === this.data.workspace) return;
+    try {
+      const result = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/rename`, { method: "POST", body: { name } });
+      this.data.workspace = result.workspace || name;
+      await this.savePluginData();
+      await this.fetchVaultList();
+      this.refreshViews();
+      new Notice(`Renamed to ${this.data.workspace}.`);
+    } catch (error) {
+      new Notice(`Could not rename: ${error.message}`);
     }
   }
 

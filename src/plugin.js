@@ -231,6 +231,54 @@ class ConfirmModal extends Modal {
   }
 }
 
+// Single-line text prompt. Resolves the trimmed string, or null on cancel/empty.
+class TextPromptModal extends Modal {
+  constructor(app, opts) {
+    super(app);
+    this.opts = opts || {};
+    this.resolve = null;
+  }
+
+  openAndWait() {
+    return new Promise((resolve) => { this.resolve = resolve; this.open(); });
+  }
+
+  finish(value) {
+    const resolve = this.resolve;
+    this.resolve = null;
+    this.close();
+    if (resolve) resolve(value);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("sd-prompt-modal");
+    contentEl.createEl("h2", { text: this.opts.title || "Enter a value" });
+    if (this.opts.body) contentEl.createEl("p", { text: this.opts.body });
+    const input = contentEl.createEl("input", { attr: { type: "text", placeholder: this.opts.placeholder || "", spellcheck: "false" } });
+    input.addClass("sd-code-input");
+    input.value = this.opts.value || "";
+    const actions = contentEl.createDiv({ cls: "sd-modal-actions" });
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const ok = actions.createEl("button", { text: this.opts.confirmText || "Save" });
+    ok.addClass("mod-cta");
+    const submit = () => this.finish(input.value.trim() || null);
+    cancel.addEventListener("click", () => this.finish(null));
+    ok.addEventListener("click", submit);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submit();
+      if (event.key === "Escape") this.finish(null);
+    });
+    window.setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (this.resolve) this.finish(null);
+  }
+}
+
 module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
@@ -490,6 +538,29 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (folder instanceof TFolder && folder.children.length === 0) {
         try { await this.app.vault.trash(folder, false); } catch (error) { /* skip */ }
       }
+    }
+  }
+
+  // Rename the active vault (admin only) so vaults are distinguishable.
+  async renameActiveVault() {
+    if (!this.data.signedIn || !this.data.vaultId) return;
+    if ((this.data.role || "") !== "Admin") { new Notice("Only an admin can rename this vault."); return; }
+    const name = await new TextPromptModal(this.app, {
+      title: "Rename vault",
+      placeholder: "Vault name",
+      value: this.data.workspace || "",
+      confirmText: "Save",
+    }).openAndWait();
+    if (!name || name === this.data.workspace) return;
+    try {
+      const result = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/rename`, { method: "POST", body: { name } });
+      this.data.workspace = result.workspace || name;
+      await this.savePluginData();
+      await this.fetchVaultList();
+      this.refreshViews();
+      new Notice(`Renamed to ${this.data.workspace}.`);
+    } catch (error) {
+      new Notice(`Could not rename: ${error.message}`);
     }
   }
 
