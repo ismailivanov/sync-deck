@@ -3,7 +3,9 @@
   "name": "Sync Deck",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
-  "description": "Realtime vault sync and team presence for Obsidian.",
+  "description": "Realtime vault sync and live team presence across your devices.",
   "author": "Ismail Ivanov",
+  "authorUrl": "https://github.com/ismailivanov",
+  "fundingUrl": "https://buymeacoffee.com/carbon06",
   "isDesktopOnly": false
 }

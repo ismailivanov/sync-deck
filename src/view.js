@@ -33,7 +33,7 @@ class SyncDeckView extends ItemView {
     this.plugin.fetchVaultList();
     // Keep the member list live-ish while the panel is open so an admin sees
     // workers join and a removed worker's own panel updates promptly.
-    this.membersTimer = window.setInterval(() => this.plugin.fetchVaultMembers(), 8000);
+    this.membersTimer = this.registerInterval(window.setInterval(() => this.plugin.fetchVaultMembers(), 8000));
     // First-run Pro offer (once), after plan/billing have had a moment to load.
     window.setTimeout(() => this.maybeShowOnboarding(), 800);
   }
@@ -89,7 +89,7 @@ class SyncDeckView extends ItemView {
   renderFooter() {
     const footer = createElement("div", "sd-footer");
     footer.append(textButton("heart", "Support the developer", () => window.open("https://buymeacoffee.com/carbon06"), "sd-ghost-btn"));
-    footer.append(textButton("book-open", "Guide", () => window.open("https://github.com/ismailivanov/SyncDeck"), "sd-ghost-btn"));
+    footer.append(textButton("book-open", "Guide", () => window.open("https://github.com/ismailivanov/sync-deck"), "sd-ghost-btn"));
     return footer;
   }
 

@@ -11,7 +11,6 @@ class SyncDeckSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.addClass("sd-settings");
 
-    containerEl.createEl("h2", { text: "Sync Deck" });
     containerEl.createEl("p", {
       text: "Realtime vault sync, team roles, and Task Deck collaboration.",
     });

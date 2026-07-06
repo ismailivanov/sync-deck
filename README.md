@@ -30,6 +30,19 @@ It's the cloud companion to [**Task Deck**](https://github.com/ismailivanov/task
 
 Pro is **$4 / month** or **$39 / year**. Upgrade any time from the Sync Deck panel — cancel whenever.
 
+## Account, network use & privacy
+
+Sync Deck is a hosted cloud service, so a few things to know up front:
+
+- **An account is required.** You sign in with your Google account; syncing does not work without signing in.
+- **Payment is required for Pro.** The free plan works without paying. **Pro** is a paid subscription (see *Plans*), billed through Stripe.
+- **Network use.** Sync Deck sends data over HTTPS to:
+  - **`api.syncdeck.cloud`** — the Sync Deck backend (hosted in Germany, EU) that stores and delivers the files you choose to sync and powers presence, invites, and roles.
+  - **Google** — to sign you in (Sync Deck receives your email, name, and profile picture).
+  - **Stripe** — to process Pro payments (your full card details are never sent to Sync Deck).
+- **No end-to-end encryption.** Your files travel over an encrypted connection but are stored on the server in a form the operator can technically access. Don't sync passwords, secrets, other people's personal data, or anything you're required to keep confidential.
+- **Privacy & terms.** What is collected and your rights (including GDPR and CCPA) are set out in the [Terms of Service & Privacy Notice](TERMS.md). You accept these in the plugin before syncing begins.
+
 ## Install
 
 Until Sync Deck lands in the community plugins list, install it manually:
