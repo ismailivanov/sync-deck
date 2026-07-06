@@ -1621,6 +1621,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (Number(storage.usedBytes) >= 0) this.data.storageUsedMb = Math.round(Number(storage.usedBytes) / 1024 / 1024);
     if (storage.boardLimit === null || Number.isFinite(Number(storage.boardLimit))) this.data.boardLimit = storage.boardLimit;
     if (Number(storage.fileBytes) > 0) this.data.fileLimitMb = Math.round(Number(storage.fileBytes) / 1024 / 1024);
+    if (typeof storage.billingEnabled === "boolean") this.data.billingEnabled = storage.billingEnabled;
     // Server confirms we're under quota -> lift any stale local block.
     if (this.data.storageBlocked && Number(storage.usedBytes) < Number(storage.limitBytes)) this.clearStorageBlock();
   }
