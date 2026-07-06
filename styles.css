@@ -572,3 +572,86 @@
 .sd-member-remove:hover {
   background: color-mix(in srgb, #ef4444 16%, transparent);
 }
+
+/* Storage / plan */
+.sd-storage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sd-storage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sd-storage-label {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sd-plan-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.sd-plan-badge.is-free {
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+}
+
+.sd-plan-badge.is-pro {
+  background: color-mix(in srgb, var(--interactive-accent) 24%, transparent);
+  color: var(--interactive-accent);
+}
+
+.sd-storage-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+}
+
+.sd-storage-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--interactive-accent);
+  transition: width 180ms ease;
+}
+
+.sd-storage-fill.is-warn {
+  background: #f59e0b;
+}
+
+.sd-storage-fill.is-full {
+  background: #ef4444;
+}
+
+.sd-storage-meta {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.sd-storage-warn {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ef4444;
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+
+.sd-storage-hint {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--interactive-accent);
+}

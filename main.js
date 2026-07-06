@@ -40,7 +40,11 @@ const DEFAULT_DATA = {
   remoteUpdatedAt: "",
   lastSync: "",
   storageUsedMb: 0,
-  storageLimitMb: 1024,
+  storageLimitMb: 100,
+  plan: "free",
+  boardLimit: 1,
+  storageBlocked: false,
+  storageBlockedReason: "",
   vaultStats: {
     totalFiles: 0,
     syncableFiles: 0,
@@ -266,8 +270,46 @@ class SyncDeckView extends ItemView {
       textButton("key-round", "Join", () => this.plugin.joinInvite())
     );
 
-    panel.append(status, progress, rules, actions);
+    panel.append(status, progress, rules, this.renderStorageSection(), actions);
     return panel;
+  }
+
+  renderStorageSection() {
+    const data = this.plugin.data;
+    const used = Math.max(0, Number(data.storageUsedMb) || 0);
+    const limit = Number(data.storageLimitMb) > 0 ? Number(data.storageLimitMb) : 100;
+    const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
+    const pct = Math.round(ratio * 100);
+    const isPro = data.plan === "pro";
+
+    const wrap = createElement("div", "sd-storage");
+    const head = createElement("div", "sd-storage-head");
+    head.append(createElement("span", "sd-storage-label", "Storage"));
+    head.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
+    wrap.append(head);
+
+    const bar = createElement("div", "sd-storage-bar");
+    const fill = createElement("div", "sd-storage-fill");
+    fill.style.width = `${pct}%`;
+    if (ratio >= 0.9) fill.classList.add("is-full");
+    else if (ratio >= 0.7) fill.classList.add("is-warn");
+    bar.append(fill);
+    wrap.append(bar);
+
+    wrap.append(createElement("div", "sd-storage-meta", `${used} MB of ${limit} MB used`));
+
+    if (data.storageBlocked) {
+      wrap.append(createElement(
+        "div",
+        "sd-storage-warn",
+        data.storageBlockedReason === "server_full"
+          ? "Sync paused — the server is temporarily full. Your changes are safe locally and will upload later."
+          : "Sync paused — storage limit reached. Free up space or upgrade to Pro to keep syncing."
+      ));
+    } else if (!isPro && ratio >= 0.8) {
+      wrap.append(createElement("div", "sd-storage-hint", "Almost full — upgrade to Pro for more space."));
+    }
+    return wrap;
   }
 
   renderActivityPanel() {
@@ -1067,6 +1109,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
     // Two roles only. Migrate legacy "Owner"/"User" records to "Admin"/"Worker".
     data.role = data.role === "Admin" || data.role === "Owner" ? "Admin" : "Worker";
     data.vaultOwner = typeof data.vaultOwner === "string" ? data.vaultOwner : "";
+    // Plan / quota (server is authoritative; these are cached for the panel and
+    // for Task Deck's board gate).
+    data.plan = data.plan === "pro" ? "pro" : "free";
+    data.storageLimitMb = Number(data.storageLimitMb) > 0 ? Number(data.storageLimitMb) : DEFAULT_DATA.storageLimitMb;
+    data.boardLimit = data.boardLimit === null || Number.isFinite(Number(data.boardLimit)) ? data.boardLimit : DEFAULT_DATA.boardLimit;
+    data.storageBlocked = !!data.storageBlocked;
+    data.storageBlockedReason = typeof data.storageBlockedReason === "string" ? data.storageBlockedReason : "";
     data.members = data.members.map((member) => {
       if (!member) return member;
       const role = member.role === "Admin" || member.role === "Owner" ? "Admin" : "Worker";
@@ -1118,6 +1167,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (!response.ok) {
       const error = new Error(body.error || `HTTP ${response.status}`);
       error.status = response.status;
+      error.code = body.code || "";
+      error.body = body;
       throw error;
     }
     return body;
@@ -1257,6 +1308,40 @@ module.exports = class SyncDeckPlugin extends Plugin {
         await this.markVaultAccessDenied("members");
       }
       // Other errors (offline, vault not registered yet) are non-fatal here.
+    }
+  }
+
+  // Pull the signed-in user's plan, limits, and usage from /me. Used to seed the
+  // panel right after sign-in and to keep the plan fresh while sync is paused (no
+  // manifest polling then). The manifest's owner-scoped storage is authoritative
+  // while sync is ON, so this is not called inside the active sync loop.
+  //
+  // /me is SELF-scoped (the signed-in user's own account). The storage bar and
+  // block, however, are OWNER-scoped (they track the active vault owner's quota).
+  // For a Worker in someone else's vault those differ — the Worker's own usage is
+  // ~0 — so we only apply /me's storage numbers when the user OWNS the active
+  // vault (or its owner isn't known yet). Otherwise we'd overwrite the owner's
+  // usage with the Worker's, and — worse — clear a legitimate owner-vault block.
+  // Blocks therefore clear ONLY via owner-scoped signals (a successful upload or
+  // the manifest reporting under-limit), never from /me.
+  async fetchPlan() {
+    if (!this.data.signedIn || !this.data.authToken) return;
+    // Owner-scoped manifest governs a joined vault's display/block; skip /me for a
+    // Worker so its self-scoped numbers never overwrite the owner's.
+    const ownsActiveVault = !this.data.vaultOwner || this.data.vaultOwner === this.data.user.email;
+    if (!ownsActiveVault) return;
+    try {
+      const me = await this.api("/me");
+      if (me.plan) this.data.plan = me.plan === "pro" ? "pro" : "free";
+      if (me.limits) {
+        if (Number(me.limits.storageBytes) > 0) this.data.storageLimitMb = Math.round(Number(me.limits.storageBytes) / 1024 / 1024);
+        if (me.limits.boardLimit === null || Number.isFinite(Number(me.limits.boardLimit))) this.data.boardLimit = me.limits.boardLimit;
+      }
+      if (me.usage && Number(me.usage.storageBytes) >= 0) this.data.storageUsedMb = Math.round(Number(me.usage.storageBytes) / 1024 / 1024);
+      await this.savePluginData();
+      this.refreshViews();
+    } catch (error) {
+      // non-fatal (offline / transient)
     }
   }
 
@@ -1462,6 +1547,50 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.pendingFolderDeletes = Array.from(folderPending).filter((f) => next.has(f) && !localFolders.has(f));
   }
 
+  // Record that uploads are blocked (quota reached or the server disk is full),
+  // update the cached numbers from the server's error body, and warn the user at
+  // most once per hour so retries don't spam notices.
+  applyStorageBlock(error) {
+    const body = (error && error.body) || {};
+    const serverFull = error && error.code === "server_full";
+    this.data.storageBlocked = true;
+    this.data.storageBlockedReason = serverFull ? "server_full" : "quota_exceeded";
+    if (Number(body.usedBytes) >= 0 && body.limitBytes) {
+      this.data.storageUsedMb = Math.round(Number(body.usedBytes) / 1024 / 1024);
+      this.data.storageLimitMb = Math.round(Number(body.limitBytes) / 1024 / 1024);
+    }
+    if (body.plan) this.data.plan = body.plan === "pro" ? "pro" : "free";
+    const now = Date.now();
+    if (!this._storageBlockNoticeAt || now - this._storageBlockNoticeAt > 3600000) {
+      this._storageBlockNoticeAt = now;
+      new Notice(serverFull
+        ? "Sync paused: the server is temporarily full. Your changes are safe locally and will upload later."
+        : `Sync paused: you've reached your ${this.data.storageLimitMb} MB storage limit. Free up space or upgrade to Pro to keep syncing.`);
+    }
+    this.refreshViews();
+  }
+
+  clearStorageBlock() {
+    if (!this.data.storageBlocked) return;
+    this.data.storageBlocked = false;
+    this.data.storageBlockedReason = "";
+    this._storageBlockNoticeAt = 0;
+    this.refreshViews();
+  }
+
+  // Cache plan + storage numbers reported by the server on the vault manifest so
+  // the panel renders live usage without an extra round-trip.
+  applyStorageFromManifest(manifest) {
+    const storage = manifest && manifest.storage;
+    if (!storage || typeof storage !== "object") return;
+    if (storage.plan) this.data.plan = storage.plan === "pro" ? "pro" : "free";
+    if (Number(storage.limitBytes) > 0) this.data.storageLimitMb = Math.round(Number(storage.limitBytes) / 1024 / 1024);
+    if (Number(storage.usedBytes) >= 0) this.data.storageUsedMb = Math.round(Number(storage.usedBytes) / 1024 / 1024);
+    if (storage.boardLimit === null || Number.isFinite(Number(storage.boardLimit))) this.data.boardLimit = storage.boardLimit;
+    // Server confirms we're under quota -> lift any stale local block.
+    if (this.data.storageBlocked && Number(storage.usedBytes) < Number(storage.limitBytes)) this.clearStorageBlock();
+  }
+
   async uploadVaultFiles(files, options = {}) {
     if (!this.data.authToken) return;
 
@@ -1499,7 +1628,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       try {
         const buffer = await this.app.vault.readBinary(file);
         const contentBase64 = arrayBufferToBase64(buffer);
-        await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
+        const uploadResult = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
           method: "POST",
           body: {
             deviceId: this.data.deviceId,
@@ -1513,6 +1642,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
             }],
           },
         });
+        if (uploadResult && uploadResult.storage) this.applyStorageFromManifest(uploadResult);
         paths.push(file.path);
         nextSignatures[file.path] = signature;
         const hash = await sha256Hex(buffer);
@@ -1523,11 +1653,29 @@ module.exports = class SyncDeckPlugin extends Plugin {
         else delete this.data.syncedHashes[file.path];
         syncedFiles += 1;
         syncedBytes += file.stat.size || 0;
+        // A successful write proves we're back under quota; clear any prior block.
+        if (this.data.storageBlocked) this.clearStorageBlock();
       } catch (error) {
+        // Quota exhausted or the server disk is full: every remaining file would
+        // fail identically. Record the block, warn the user ONCE, and stop this
+        // run's uploads (leave the rest un-synced so they retry once space frees
+        // up or the user upgrades). This is distinct from a per-file skip.
+        if (error && (error.code === "quota_exceeded" || error.code === "server_full")) {
+          failed.add(file.path);
+          this.applyStorageBlock(error);
+          break;
+        }
         // One file failing must not abort the whole sync. Leave it un-synced: not
         // in `paths` (so it is never recorded as on-server, which would let the
         // pull trash it), no signature (retries next sync), and left dirty.
         failed.add(file.path);
+      }
+    }
+    // Any files after a hard block never got a chance to upload — keep them dirty
+    // so a later sync (post-upgrade / post-cleanup) retries them.
+    if (this.data.storageBlocked && this.dirtyUploadPaths) {
+      for (const file of files) {
+        if (!paths.includes(file.path)) { failed.add(file.path); this.dirtyUploadPaths.add(file.path); }
       }
     }
     this.uploadedSignatures = nextSignatures;
@@ -1657,12 +1805,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (this._lastAccessCheck && now - this._lastAccessCheck < ACCESS_CHECK_INTERVAL_MS) return;
       this._lastAccessCheck = now;
       await this.fetchVaultMembers(); // GET /members; a 403 triggers markVaultAccessDenied
+      await this.fetchPlan(); // keep plan/usage fresh while sync is paused
       return;
     }
 
     try {
       await this.registerVault();
       const manifest = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      this.applyStorageFromManifest(manifest);
       if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) return;
       await this.pullLatest({ manifest, silent: true });
     } catch (error) {
@@ -1687,6 +1837,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     try {
       await this.registerVault();
       const manifest = options.manifest || await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      this.applyStorageFromManifest(manifest);
       let pulledFiles = 0;
       let pulledBytes = 0;
       let trashedFiles = 0;
@@ -2041,6 +2192,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
         await this.registerVault();
       }
       await this.fetchVaultMembers();
+      await this.fetchPlan();
       await this.savePluginData();
       new Notice("Signed in with Google.");
     } catch (error) {
