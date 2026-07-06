@@ -895,11 +895,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
     let started = false;
     try {
-      // A brand-new vault was already confirmed via its name prompt, so skip the
-      // second dialog; an existing-vault switch gets the destructive warning.
+      // Confirm only when there's actually synced content to move to trash. A
+      // brand-new vault (name already prompted) and opening a vault from an empty
+      // state (nothing synced yet) both skip the destructive dialog.
       let confirmed = true;
-      if (!target.isNew) {
-        const syncedCount = this.getRemoteKnownPaths().size;
+      const syncedCount = this.getRemoteKnownPaths().size;
+      if (!target.isNew && syncedCount > 0) {
         const name = target.workspace || "the selected vault";
         confirmed = await new ConfirmModal(this.app, {
           title: `Switch to ${target.workspace || "this vault"}?`,

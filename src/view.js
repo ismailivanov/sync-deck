@@ -67,6 +67,10 @@ class SyncDeckView extends ItemView {
 
     if (!data.signedIn) {
       shell.append(this.renderSignedOut());
+    } else if (!data.vaultInitialized) {
+      // No vault open yet — a vault system: pick one to open, or create a new one.
+      // Nothing is active at the top until a vault is opened.
+      shell.append(this.renderNoVaultState(), this.renderVaultsSection());
     } else {
       shell.append(
         this.renderActiveVaultCard(),
@@ -118,6 +122,23 @@ class SyncDeckView extends ItemView {
       "Sign in to sync this vault across your devices and with your team — with live presence, invites, and roles."
     ));
     wrap.append(textButton("log-in", "Continue with Google", () => this.plugin.signIn(), "sd-primary-btn sd-block-btn"));
+    return wrap;
+  }
+
+  // Shown when no vault is open. Nothing syncs until the user creates or opens one.
+  renderNoVaultState() {
+    const data = this.plugin.data;
+    const hasVaults = Array.isArray(data.vaultList) && data.vaultList.length > 0;
+    const wrap = createElement("div", "sd-card sd-signedout");
+    wrap.append(createElement("h3", "sd-signedout-title", hasVaults ? "No vault open" : "Create your first vault"));
+    wrap.append(createElement(
+      "p",
+      "sd-signedout-copy",
+      hasVaults
+        ? "Open one of your vaults below, or create a new one. Nothing syncs until you do."
+        : "Create a vault to start syncing this Obsidian vault. You'll choose whether to include your existing files."
+    ));
+    wrap.append(textButton("plus", "Create a vault", () => this.plugin.createNewVault(), "sd-primary-btn sd-block-btn"));
     return wrap;
   }
 
@@ -236,6 +257,8 @@ class SyncDeckView extends ItemView {
   // ---- Vaults (switch / create / inspect) ----------------------------------
   renderVaultsSection() {
     const data = this.plugin.data;
+    const open = !!data.vaultInitialized; // is a vault currently open at the top?
+    // When no vault is open, list ALL vaults (there's no active one to exclude).
     const others = (Array.isArray(data.vaultList) ? data.vaultList : []).filter((v) => v.vaultId !== data.vaultId);
     const section = this.section("Vaults", others.length || null);
 
@@ -256,17 +279,25 @@ class SyncDeckView extends ItemView {
         } else {
           side.append(textButton("log-out", "", () => this.plugin.leaveVault(v), "sd-icon-btn sd-danger"));
         }
-        side.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
+        side.append(textButton("arrow-right-left", open ? "Switch" : "Open", () => this.plugin.switchToVault(v)));
         row.append(side);
         list.append(row);
       });
       section.append(list);
+    } else if (open) {
+      section.append(this.emptyState("No other vaults", "Create a new vault or invite people to this one."));
     }
 
-    const actions = createElement("div", "sd-actions-row");
-    actions.append(textButton("plus", "New vault", () => this.plugin.createNewVault(), "sd-grow"));
-    section.append(actions);
-    section.append(createElement("p", "sd-hint", "A new or switched vault opens on its own — the current vault's synced files move to trash (recoverable) so vaults never mix. Tap the eye to peek inside any vault."));
+    // The create CTA lives in the no-vault card when nothing's open, so don't
+    // duplicate it here in that state.
+    if (open) {
+      const actions = createElement("div", "sd-actions-row");
+      actions.append(textButton("plus", "New vault", () => this.plugin.createNewVault(), "sd-grow"));
+      section.append(actions);
+    }
+    section.append(createElement("p", "sd-hint", open
+      ? "Switching opens another vault here — the current vault's synced files move to trash (recoverable) so vaults never mix. Tap the eye to peek inside any vault."
+      : "Open a vault to sync it into this Obsidian vault. Tap the eye to peek inside any vault first."));
     return section;
   }
 
