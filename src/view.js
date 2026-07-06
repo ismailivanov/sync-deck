@@ -82,7 +82,7 @@ class SyncDeckView extends ItemView {
 
   renderFooter() {
     const footer = createElement("div", "sd-footer");
-    footer.append(textButton("life-buoy", "Support", () => window.open("mailto:support@syncdeck.cloud"), "sd-ghost-btn"));
+    footer.append(textButton("heart", "Support the developer", () => window.open("https://buymeacoffee.com/carbon06"), "sd-ghost-btn"));
     footer.append(textButton("book-open", "Guide", () => window.open("https://github.com/ismailivanov/SyncDeck"), "sd-ghost-btn"));
     return footer;
   }
@@ -145,8 +145,13 @@ class SyncDeckView extends ItemView {
     head.append(nameWrap);
     const headActions = createElement("div", "sd-vc-head-actions");
     headActions.append(textButton("eye", "", () => this.plugin.inspectVault({ vaultId: data.vaultId, workspace: data.workspace }), "sd-icon-btn"));
+    const ownsActive = !data.vaultOwner || data.vaultOwner === data.user.email;
     if ((data.role || "") === "Admin") {
       headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
+    }
+    if (!ownsActive) {
+      // A member (worker) can leave the vault they joined; their local files stay.
+      headActions.append(textButton("log-out", "", () => this.plugin.leaveVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
     }
     head.append(headActions);
     card.append(head);
@@ -245,8 +250,11 @@ class SyncDeckView extends ItemView {
         row.append(main);
         const side = createElement("div", "sd-row-side");
         side.append(textButton("eye", "", () => this.plugin.inspectVault(v), "sd-icon-btn"));
-        if (!v.owner || v.owner === data.user.email) {
+        if (v.owner === data.user.email) {
+          // Owner can delete; a member can leave (keeps their local files).
           side.append(textButton("trash-2", "", () => this.plugin.deleteVault(v), "sd-icon-btn sd-danger"));
+        } else {
+          side.append(textButton("log-out", "", () => this.plugin.leaveVault(v), "sd-icon-btn sd-danger"));
         }
         side.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
         row.append(side);

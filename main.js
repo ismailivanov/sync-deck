@@ -245,7 +245,7 @@ class SyncDeckView extends ItemView {
 
   renderFooter() {
     const footer = createElement("div", "sd-footer");
-    footer.append(textButton("life-buoy", "Support", () => window.open("mailto:support@syncdeck.cloud"), "sd-ghost-btn"));
+    footer.append(textButton("heart", "Support the developer", () => window.open("https://buymeacoffee.com/carbon06"), "sd-ghost-btn"));
     footer.append(textButton("book-open", "Guide", () => window.open("https://github.com/ismailivanov/SyncDeck"), "sd-ghost-btn"));
     return footer;
   }
@@ -308,8 +308,13 @@ class SyncDeckView extends ItemView {
     head.append(nameWrap);
     const headActions = createElement("div", "sd-vc-head-actions");
     headActions.append(textButton("eye", "", () => this.plugin.inspectVault({ vaultId: data.vaultId, workspace: data.workspace }), "sd-icon-btn"));
+    const ownsActive = !data.vaultOwner || data.vaultOwner === data.user.email;
     if ((data.role || "") === "Admin") {
       headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
+    }
+    if (!ownsActive) {
+      // A member (worker) can leave the vault they joined; their local files stay.
+      headActions.append(textButton("log-out", "", () => this.plugin.leaveVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
     }
     head.append(headActions);
     card.append(head);
@@ -408,8 +413,11 @@ class SyncDeckView extends ItemView {
         row.append(main);
         const side = createElement("div", "sd-row-side");
         side.append(textButton("eye", "", () => this.plugin.inspectVault(v), "sd-icon-btn"));
-        if (!v.owner || v.owner === data.user.email) {
+        if (v.owner === data.user.email) {
+          // Owner can delete; a member can leave (keeps their local files).
           side.append(textButton("trash-2", "", () => this.plugin.deleteVault(v), "sd-icon-btn sd-danger"));
+        } else {
+          side.append(textButton("log-out", "", () => this.plugin.leaveVault(v), "sd-icon-btn sd-danger"));
         }
         side.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
         row.append(side);
@@ -1667,6 +1675,72 @@ module.exports = class SyncDeckPlugin extends Plugin {
     } catch (error) {
       new Notice(`Could not delete: ${error.message}`);
     }
+  }
+
+  // Detach from the active vault WITHOUT trashing local files: land on a fresh,
+  // empty personal vault with sync OFF, so the user keeps their files and works
+  // locally. (Contrast markVaultAccessDenied, which trashes on forced removal.)
+  // Clearing the known-set here also makes any stray access-denied a no-op, so an
+  // in-flight poll can never trash the kept files.
+  detachToEmptyVault() {
+    this.data.syncEnabled = false;
+    this.data.syncProgress = 0;
+    this.data.vaultStats.syncedFiles = 0;
+    this.data.vaultId = uid("vault");
+    this.data.workspace = (this.app.vault.getName && this.app.vault.getName()) || "My vault";
+    this.data.role = "Admin";
+    this.data.members = [];
+    this.data.vaultOwner = this.data.user.email || "";
+    this.data.remoteKnownPaths = [];
+    this.data.remoteKnownVaultId = "";
+    this.data.pendingDeletes = [];
+    this.data.remoteKnownFolders = [];
+    this.data.remoteKnownFoldersVaultId = "";
+    this.data.pendingFolderDeletes = [];
+    this.data.remoteUpdatedAt = "";
+    this.data.syncedHashes = {};
+    this.uploadedSignatures = {};
+    this.dirtyUploadPaths = new Set();
+  }
+
+  // Leave a vault you're a member of (not the owner). Local files are KEPT — if
+  // it's the active vault you detach to a fresh empty vault and keep working
+  // locally. Non-owners only; the owner deletes instead.
+  async leaveVault(vault) {
+    if (!this.data.signedIn || !vault || !vault.vaultId) return;
+    if (vault.owner && vault.owner === this.data.user.email) { new Notice("You own this vault — delete it instead of leaving."); return; }
+    const leavingId = vault.vaultId;
+    const isActive = leavingId === this.data.vaultId;
+    const name = vault.workspace || "this vault";
+    const confirmed = await new ConfirmModal(this.app, {
+      title: `Leave ${name}?`,
+      body: isActive
+        ? `You'll stop syncing ${name}. Your local files stay exactly as they are — keep working on them offline. You can rejoin later only with a new invite.`
+        : `You'll leave ${name}. You can rejoin later only with a new invite.`,
+      confirmText: "Leave vault",
+      danger: true,
+    }).openAndWait();
+    if (!confirmed) return;
+
+    // Detach FIRST (clears the known-set) so no in-flight poll can trash files
+    // once /leave makes the server return access-denied for the old vault.
+    if (isActive) {
+      this.detachToEmptyVault();
+      await this.savePluginData();
+      this.refreshViews();
+    }
+    try {
+      await this.api(`/vaults/${encodeURIComponent(leavingId)}/leave`, { method: "POST" });
+    } catch (error) {
+      new Notice(isActive
+        ? `Left ${name} on this device (files kept), but the server didn't confirm: ${error.message}`
+        : `Could not leave: ${error.message}`);
+      await this.fetchVaultList();
+      return;
+    }
+    await this.fetchVaultList();
+    this.refreshViews();
+    new Notice(`Left ${name}. Your local files are untouched.`);
   }
 
   // The vaults this user can access (owned + joined), for the switchable list.
