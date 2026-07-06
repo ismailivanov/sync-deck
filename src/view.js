@@ -170,7 +170,10 @@ class SyncDeckView extends ItemView {
     if ((data.role || "") === "Admin") {
       headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
     }
-    if (!ownsActive) {
+    if (ownsActive) {
+      // Owner can delete the open vault (returns to no-vault state; files kept).
+      headActions.append(textButton("trash-2", "", () => this.plugin.deleteVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
+    } else {
       // A member (worker) can leave the vault they joined; their local files stay.
       headActions.append(textButton("log-out", "", () => this.plugin.leaveVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
     }
