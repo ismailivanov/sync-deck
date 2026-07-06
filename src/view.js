@@ -223,6 +223,9 @@ class SyncDeckView extends ItemView {
         row.append(main);
         const side = createElement("div", "sd-row-side");
         side.append(textButton("eye", "", () => this.plugin.inspectVault(v), "sd-icon-btn"));
+        if (!v.owner || v.owner === data.user.email) {
+          side.append(textButton("trash-2", "", () => this.plugin.deleteVault(v), "sd-icon-btn sd-danger"));
+        }
         side.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
         row.append(side);
         list.append(row);
