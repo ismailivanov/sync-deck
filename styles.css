@@ -1,684 +1,363 @@
+/* ============================================================================
+   Sync Deck panel — clean single-column layout
+   ========================================================================== */
+
 .sd-root {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  gap: 14px;
-  padding: 16px;
-  color: var(--text-normal);
-  background: var(--background-primary);
-}
-
-.sd-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.sd-toolbar-title,
-.sd-toolbar-actions,
-.sd-text-button,
-.sd-panel-header,
-.sd-sync-status,
-.sd-activity-row,
-.sd-rule {
-  display: flex;
-  align-items: center;
-}
-
-.sd-toolbar-title {
-  min-width: 0;
-  gap: 10px;
-}
-
-.sd-toolbar h2 {
-  margin: 0;
-  font-size: 20px;
-  line-height: 1.2;
-}
-
-.sd-toolbar-actions {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.sd-layout {
-  display: grid;
-  align-items: start;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  column-gap: 12px;
-  row-gap: 22px;
-  min-height: 0;
-  overflow-y: auto;
-  padding-bottom: 8px;
-}
-
-.sd-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-height: 160px;
-  min-width: 0;
-  /* Safe default: a panel with no explicit span fills the row instead of
-     collapsing to a single grid track. Variant classes below narrow it. */
-  grid-column: 1 / -1;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  padding: 14px;
-  background: var(--background-secondary);
-}
-
-/* Top row: sync + members side by side. Recent activity keeps the full-width
-   default and drops to its own row below. Class-based (not :nth-child) so the
-   layout survives adding, removing, or reordering panels. */
-.sd-panel-sync,
-.sd-panel-members {
-  grid-column: span 6;
-}
-
-.sd-panel-activity {
-  grid-column: 1 / -1;
-}
-
-.sd-panel-header {
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.sd-panel-header h3 {
-  margin: 0;
-  font-size: 16px;
-  line-height: 1.2;
-}
-
-.sd-text-button {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--interactive-normal);
-  color: var(--text-normal);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 16%);
-  cursor: pointer;
-}
-
-.sd-text-button {
-  min-height: 34px;
-  justify-content: center;
-  gap: 7px;
-  padding: 6px 10px;
-  font-weight: 700;
-  /* Keep each button on one line; when space is tight the flex-wrap on
-     .sd-toolbar-actions / .sd-panel-actions moves a whole button down instead
-     of wrapping a label like "Continue with Google" mid-word. */
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.sd-text-button.mod-cta {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-}
-
-.sd-icon-badge {
-  display: inline-flex;
-  width: 34px;
-  height: 34px;
-  align-items: center;
-  justify-content: center;
   padding: 0;
+  overflow-y: auto;
 }
 
-.sd-icon-badge {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  background: var(--background-primary);
-  color: var(--text-muted);
+.sd-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 16px 14px 28px;
 }
 
-.sd-text-button:hover {
-  border-color: var(--background-modifier-border-hover);
-  background: var(--interactive-hover);
-}
+.sd-hidden { display: none; }
 
-.sd-button-icon,
-.sd-button-icon > svg {
-  display: block;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
-}
-
-.sd-status-pill {
+/* ---- Icons / buttons ------------------------------------------------------ */
+.sd-button-icon {
   display: inline-flex;
   align-items: center;
-  min-height: 22px;
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-size: 11px;
-  font-weight: 800;
+  justify-content: center;
 }
+.sd-button-icon svg { width: 16px; height: 16px; }
 
-.sd-status-pill.is-good {
-  background: color-mix(in srgb, #22c55e 22%, transparent);
-  color: #75e59b;
-}
-
-.sd-status-pill.is-muted {
-  background: var(--background-modifier-hover);
-  color: var(--text-muted);
-}
-
-.sd-activity-copy span,
-.sd-empty-state span,
-.sd-sync-status span {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.sd-activity-copy strong,
-.sd-empty-state strong {
-  overflow: hidden;
+.sd-text-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
   font-size: 13px;
-  text-overflow: ellipsis;
+  font-weight: 600;
+  cursor: pointer;
   white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease;
 }
+.sd-text-button:hover { background: var(--background-modifier-hover); }
+.sd-text-button:empty { display: none; }
 
-.sd-sync-status {
+.sd-primary-btn {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: 700;
+}
+.sd-primary-btn:hover { background: var(--interactive-accent-hover); }
+
+.sd-ghost-btn {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  padding: 6px 8px;
+}
+.sd-ghost-btn:hover { background: var(--background-modifier-hover); }
+
+.sd-icon-btn {
+  padding: 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+.sd-icon-btn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.sd-danger { color: #ef4444; }
+.sd-danger:hover { background: color-mix(in srgb, #ef4444 14%, transparent); color: #ef4444; }
+
+.sd-block-btn { width: 100%; }
+.sd-grow { flex: 1; }
+
+/* ---- Header --------------------------------------------------------------- */
+.sd-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 10px;
 }
+.sd-brand { display: flex; align-items: center; gap: 10px; }
+.sd-brand-name { font-size: 18px; font-weight: 800; letter-spacing: -0.01em; }
 
-.sd-sync-status strong {
-  font-size: 26px;
+.sd-online {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.sd-online.is-on { color: #22c55e; }
+.sd-online.is-off { color: var(--text-muted); }
+.sd-online-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor;
 }
 
-.sd-progress {
-  height: 8px;
-  overflow: hidden;
+.sd-account { display: flex; align-items: center; gap: 8px; }
+
+/* ---- Cards / sections ----------------------------------------------------- */
+.sd-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.sd-section { display: flex; flex-direction: column; gap: 10px; }
+.sd-section-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.sd-section-count {
+  min-width: 18px;
+  padding: 0 6px;
   border-radius: 999px;
   background: var(--background-modifier-border);
-}
-
-.sd-progress-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--interactive-accent);
-  transition: width 180ms ease;
-}
-
-.sd-rule-list,
-.sd-panel-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.sd-rule {
-  gap: 7px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
-  padding: 5px 8px;
-  background: var(--background-primary);
   color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.sd-rule-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--interactive-accent);
-}
-
-.sd-activity-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.sd-activity-list {
-  overflow-y: auto;
-  padding-right: 2px;
-}
-
-.sd-activity-list {
-  max-height: 190px;
-}
-
-.sd-activity-row {
-  gap: 10px;
-  min-width: 0;
-}
-
-.sd-avatar {
-  display: inline-flex;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  color: white;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.sd-profile-avatar {
-  display: inline-flex;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
-  color: white;
   font-size: 11px;
-  font-weight: 900;
+  font-weight: 800;
+  text-align: center;
 }
 
-.sd-avatar,
-.sd-profile-avatar {
-  overflow: hidden;
+.sd-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin: 0;
 }
 
-.sd-avatar img,
-.sd-profile-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.sd-activity-copy,
-.sd-empty-state {
+.sd-empty {
   display: flex;
-  flex: 1;
-  min-width: 0;
   flex-direction: column;
   gap: 3px;
-}
-
-.sd-empty-state {
+  padding: 14px;
   border: 1px dashed var(--background-modifier-border);
-  border-radius: 8px;
-  padding: 12px;
-  background: var(--background-primary);
+  border-radius: 10px;
+  text-align: center;
 }
+.sd-empty strong { font-size: 13px; }
+.sd-empty span { font-size: 12px; color: var(--text-muted); }
 
-.sd-cursor-marker {
-  width: 4px;
-  height: 36px;
-  flex: 0 0 4px;
-  border-radius: 999px;
-}
+/* ---- Signed-out ----------------------------------------------------------- */
+.sd-signedout { display: flex; flex-direction: column; gap: 10px; text-align: center; }
+.sd-signedout-title { margin: 4px 0 0; font-size: 16px; }
+.sd-signedout-copy { margin: 0 0 6px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
 
-.sd-settings p {
-  color: var(--text-muted);
-}
+/* ---- Active vault card ---------------------------------------------------- */
+.sd-vault-card { display: flex; flex-direction: column; gap: 14px; }
 
-.sd-invite-modal {
+.sd-vc-head {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
 }
-
-.sd-invite-modal h2,
-.sd-invite-modal p {
-  margin: 0;
+.sd-vc-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
-
-.sd-invite-modal p {
-  color: var(--text-muted);
-}
-
-.sd-code-input {
-  width: 100%;
-  height: 42px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  padding: 0 12px;
-  background: var(--background-secondary);
-  color: var(--text-normal);
+.sd-vc-name strong {
   font-size: 16px;
   font-weight: 700;
-  letter-spacing: 0;
-}
-
-.sd-modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-@media (max-width: 900px) {
-  .sd-toolbar {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .sd-toolbar-actions {
-    justify-content: flex-start;
-  }
-
-  .sd-panel,
-  .sd-panel-sync,
-  .sd-panel-members,
-  .sd-panel-activity {
-    grid-column: 1 / -1;
-  }
-}
-
-/* Live editor presence: remote member cursors drawn over the editor. */
-.sd-editor-cursors {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.sd-editor-cursor {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 2px;
-  will-change: transform;
-  transition: transform 120ms linear;
-}
-
-/* While the editor is scrolling, drop the transition so carets track exactly. */
-.sd-editor-cursors.is-scrolling .sd-editor-cursor {
-  transition: none;
-}
-
-.sd-editor-sel {
-  position: absolute;
-  top: 0;
-  left: 0;
-  border-radius: 2px;
-  background: var(--sd-cursor-color, #8b5cf6);
-  opacity: 0.22;
-  pointer-events: none;
-  will-change: transform;
-}
-
-.sd-editor-caret {
-  position: absolute;
-  inset: 0;
-  width: 2px;
-  background: var(--sd-cursor-color, #8b5cf6);
-}
-
-.sd-editor-name {
-  position: absolute;
-  top: -14px;
-  left: 0;
-  padding: 1px 5px;
-  border-radius: 4px 4px 4px 0;
-  color: #fff;
-  background: var(--sd-cursor-color, #8b5cf6);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.4;
   white-space: nowrap;
-}
-
-.sd-presence-status {
-  color: var(--text-muted);
-}
-
-/* Vault Members panel */
-.sd-members-note {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-/* Query context: member rows respond to the PANEL's own width, not the
-   viewport. This is what the 900px media query cannot do — a SyncDeck leaf
-   can be dragged narrow while the window stays wide, so the media query never
-   fires but the panel is tiny. */
-.sd-panel-members {
-  container-type: inline-size;
-}
-
-.sd-member-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-/* When the members panel itself is narrow, stack each row: name/email on top,
-   badge + Remove grouped on the left underneath, so nothing overflows. The
-   descendant selectors (0,2,0) outrank the base .sd-member-* rules (0,1,0) so
-   these win regardless of source order. */
-@container (max-width: 360px) {
-  .sd-member-list .sd-member-main {
-    flex-basis: 100%;
-  }
-
-  .sd-member-list .sd-member-side {
-    width: 100%;
-    justify-content: flex-start;
-  }
-}
-
-.sd-member-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  /* Wrap the side group (badge + Remove) below the name when the panel is
-     narrow — a SyncDeck leaf can be dragged well below the 900px media query,
-     which is viewport-based and never fires for a narrow sidebar. */
-  flex-wrap: wrap;
-  gap: 8px 10px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 10px;
-  padding: 8px 10px;
-  background: var(--background-primary);
-}
-
-.sd-member-main {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  /* Basis 0 so the name/email column shrinks-to-fill and keeps the badge +
-     Remove on the same line (ellipsizing the name) until the panel is narrow
-     enough for the container query below to stack the row. */
-  flex: 1 1 0;
-}
-
-.sd-member-avatar {
-  display: inline-flex;
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
-  border-radius: 8px;
-  color: white;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.sd-member-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.sd-member-info {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.sd-member-info strong {
-  overflow: hidden;
-  font-size: 13px;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
-
-.sd-member-email {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sd-member-side {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
-  /* When there is no room even on its own line, let the Remove button drop
-     under the role badge instead of overflowing the panel. */
-  flex: 0 1 auto;
-  flex-wrap: wrap;
-}
-
-.sd-role-badge {
+.sd-icon-badge {
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
-  padding: 3px 9px;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.sd-role-badge.is-admin {
-  background: color-mix(in srgb, var(--interactive-accent) 24%, transparent);
   color: var(--interactive-accent);
+  flex: none;
 }
+.sd-icon-badge svg { width: 17px; height: 17px; }
 
-.sd-role-badge.is-worker {
-  background: var(--background-modifier-hover);
-  color: var(--text-muted);
-}
-
-.sd-member-remove {
-  padding: 4px 9px;
-  font-size: 11px;
-  color: #ef4444;
-  border-color: color-mix(in srgb, #ef4444 40%, transparent);
-}
-
-.sd-member-remove:hover {
-  background: color-mix(in srgb, #ef4444 16%, transparent);
-}
-
-/* Storage / plan */
-.sd-storage {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sd-storage-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.sd-storage-label {
+.sd-vc-meta {
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 600;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  margin-top: -6px;
 }
 
 .sd-plan-badge {
-  display: inline-flex;
-  align-items: center;
+  flex: none;
   border-radius: 999px;
-  padding: 3px 9px;
-  font-size: 11px;
+  padding: 2px 9px;
+  font-size: 10px;
   font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
+.sd-plan-badge.is-free { background: var(--background-modifier-border); color: var(--text-muted); }
+.sd-plan-badge.is-pro { background: color-mix(in srgb, var(--interactive-accent) 22%, transparent); color: var(--interactive-accent); }
 
-.sd-plan-badge.is-free {
-  background: var(--background-modifier-hover);
+/* Storage */
+.sd-storage { display: flex; flex-direction: column; gap: 6px; }
+.sd-storage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
   color: var(--text-muted);
+  font-weight: 600;
 }
-
-.sd-plan-badge.is-pro {
-  background: color-mix(in srgb, var(--interactive-accent) 24%, transparent);
-  color: var(--interactive-accent);
-}
-
-.sd-storage-bar {
-  height: 8px;
-  overflow: hidden;
+.sd-storage-num { color: var(--text-normal); font-weight: 700; }
+.sd-bar {
+  height: 7px;
   border-radius: 999px;
+  overflow: hidden;
   background: var(--background-modifier-border);
 }
-
-.sd-storage-fill {
+.sd-bar-fill {
   height: 100%;
   border-radius: inherit;
   background: var(--interactive-accent);
-  transition: width 180ms ease;
+  transition: width 200ms ease;
 }
-
-.sd-storage-fill.is-warn {
-  background: #f59e0b;
-}
-
-.sd-storage-fill.is-full {
-  background: #ef4444;
-}
-
-.sd-storage-meta {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-muted);
-}
-
+.sd-bar-fill.is-warn { background: #f59e0b; }
+.sd-bar-fill.is-full { background: #ef4444; }
+.sd-storage-sub { font-size: 11px; color: var(--text-muted); }
 .sd-storage-warn {
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   color: #ef4444;
   background: color-mix(in srgb, #ef4444 12%, transparent);
   border-radius: 8px;
   padding: 7px 9px;
+  line-height: 1.4;
 }
 
-.sd-storage-hint {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--interactive-accent);
+/* Sync state line */
+.sd-sync-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
 }
+.sd-sync-row strong { font-weight: 700; }
+.sd-sync-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-muted); }
+.sd-sync-row.is-good .sd-sync-dot { background: #22c55e; }
+.sd-sync-row.is-accent .sd-sync-dot { background: var(--interactive-accent); }
+.sd-sync-row.is-danger { color: #ef4444; }
+.sd-sync-row.is-danger .sd-sync-dot { background: #ef4444; }
+.sd-sync-time { color: var(--text-muted); font-weight: 600; }
+
+.sd-vc-actions { display: flex; gap: 8px; }
 
 .sd-upgrade-btn {
-  margin-top: 2px;
-  justify-content: center;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  border-color: var(--interactive-accent);
-  font-weight: 800;
+  background: color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--interactive-accent) 34%, transparent);
+  color: var(--interactive-accent);
+  font-weight: 700;
+}
+.sd-upgrade-btn:hover { background: color-mix(in srgb, var(--interactive-accent) 26%, transparent); }
+
+/* ---- Rows (vaults, members) ---------------------------------------------- */
+.sd-rows { display: flex; flex-direction: column; gap: 6px; }
+.sd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+}
+.sd-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sd-row-main strong {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sd-row-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.sd-upgrade-btn:hover {
-  background: var(--interactive-accent-hover);
+.sd-actions-row { display: flex; gap: 8px; }
+
+/* Members */
+.sd-member-main { flex-direction: row; align-items: center; gap: 10px; }
+.sd-member-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sd-member-info strong { font-size: 13px; font-weight: 700; }
+.sd-member-side { display: flex; align-items: center; gap: 6px; flex: none; }
+.sd-avatar, .sd-account-avatar, .sd-member-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  flex: none;
+}
+.sd-avatar, .sd-member-avatar { width: 30px; height: 30px; }
+.sd-account-avatar { width: 26px; height: 26px; }
+.sd-avatar img, .sd-account-avatar img, .sd-member-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+.sd-role-badge {
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.sd-role-badge.is-admin { background: color-mix(in srgb, var(--interactive-accent) 22%, transparent); color: var(--interactive-accent); }
+.sd-role-badge.is-worker { background: var(--background-modifier-border); color: var(--text-muted); }
+
+/* ---- Activity ------------------------------------------------------------- */
+.sd-activity { display: flex; flex-direction: column; }
+.sd-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 4px;
+  font-size: 13px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.sd-activity-row:first-child { border-top: none; }
+.sd-act-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.sd-act-dot.is-done { background: #22c55e; }
+.sd-act-dot.is-pending { background: var(--interactive-accent); }
+.sd-act-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sd-act-time { font-size: 11px; color: var(--text-muted); flex: none; }
+
+/* ============================================================================
+   Modals (invite / join, confirm, rename prompt, upgrade)
+   ========================================================================== */
+.sd-code-input {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 14px;
+}
+.sd-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 /* Upgrade modal */
-.sd-upgrade-modal h2 {
-  margin-bottom: 2px;
-}
-
-.sd-upgrade-sub {
-  color: var(--text-muted);
-  margin-top: 0;
-  margin-bottom: 14px;
-}
+.sd-upgrade-modal h2 { margin-bottom: 2px; }
+.sd-upgrade-sub { color: var(--text-muted); margin-top: 0; margin-bottom: 14px; }
 
 .sd-plan-compare {
   border: 1px solid var(--background-modifier-border);
@@ -686,7 +365,6 @@
   overflow: hidden;
   margin-bottom: 16px;
 }
-
 .sd-plan-row {
   display: grid;
   grid-template-columns: 1fr auto auto;
@@ -696,11 +374,7 @@
   border-top: 1px solid var(--background-modifier-border);
   font-size: 13px;
 }
-
-.sd-plan-row:first-child {
-  border-top: none;
-}
-
+.sd-plan-row:first-child { border-top: none; }
 .sd-plan-head {
   background: var(--background-secondary);
   font-weight: 800;
@@ -708,29 +382,11 @@
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+.sd-plan-cell { min-width: 64px; text-align: right; font-weight: 700; }
+.sd-plan-label { text-align: left; font-weight: 600; color: var(--text-muted); }
+.sd-plan-pro { color: var(--interactive-accent); }
 
-.sd-plan-cell {
-  min-width: 64px;
-  text-align: right;
-  font-weight: 700;
-}
-
-.sd-plan-label {
-  text-align: left;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.sd-plan-pro {
-  color: var(--interactive-accent);
-}
-
-.sd-price-options {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
+.sd-price-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .sd-price-card {
   position: relative;
   border: 1.5px solid var(--background-modifier-border);
@@ -738,33 +394,11 @@
   padding: 16px 14px 14px;
   text-align: center;
 }
-
-.sd-price-card.is-active {
-  border-color: var(--interactive-accent);
-}
-
-.sd-price-card.is-soon {
-  opacity: 0.72;
-}
-
-.sd-price-amount {
-  font-size: 30px;
-  font-weight: 900;
-  line-height: 1;
-}
-
-.sd-price-period {
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-  margin-top: 4px;
-  margin-bottom: 12px;
-}
-
-.sd-price-btn {
-  width: 100%;
-}
-
+.sd-price-card.is-active { border-color: var(--interactive-accent); }
+.sd-price-card.is-soon { opacity: 0.72; }
+.sd-price-amount { font-size: 30px; font-weight: 900; line-height: 1; }
+.sd-price-period { color: var(--text-muted); font-size: 12px; font-weight: 700; margin-top: 4px; margin-bottom: 12px; }
+.sd-price-btn { width: 100%; }
 .sd-price-badge {
   position: absolute;
   top: -9px;
@@ -778,87 +412,6 @@
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.sd-upgrade-foot {
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 12px;
-  margin-top: 14px;
-  margin-bottom: 0;
-}
-
-/* Vault list (switcher) */
-.sd-vault-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sd-vault-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 11px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 9px;
-  background: var(--background-primary);
-}
-
-.sd-vault-row.is-active {
-  border-color: var(--interactive-accent);
-  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
-}
-
-.sd-vault-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.sd-vault-nameline {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.sd-vault-nameline strong {
-  font-size: 13px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-
-.sd-vault-badge {
-  flex: none;
-  background: color-mix(in srgb, var(--interactive-accent) 22%, transparent);
-  color: var(--interactive-accent);
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.sd-vault-meta {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.sd-vault-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin: 10px 0 0;
-  line-height: 1.4;
-}
-
-.sd-confirm-modal .sd-modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 16px;
-}
+.sd-upgrade-foot { text-align: center; color: var(--text-muted); font-size: 12px; margin-top: 14px; margin-bottom: 0; }
