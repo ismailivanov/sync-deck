@@ -188,6 +188,49 @@ class UpgradeModal extends Modal {
   }
 }
 
+// Generic yes/no confirmation. Resolves true on confirm, false on cancel/close.
+class ConfirmModal extends Modal {
+  constructor(app, opts) {
+    super(app);
+    this.opts = opts || {};
+    this.resolve = null;
+  }
+
+  openAndWait() {
+    return new Promise((resolve) => {
+      this.resolve = resolve;
+      this.open();
+    });
+  }
+
+  finish(value) {
+    const resolve = this.resolve;
+    this.resolve = null;
+    this.close();
+    if (resolve) resolve(value);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("sd-confirm-modal");
+    contentEl.createEl("h2", { text: this.opts.title || "Are you sure?" });
+    if (this.opts.body) contentEl.createEl("p", { text: this.opts.body });
+    const actions = contentEl.createDiv({ cls: "sd-modal-actions" });
+    const cancel = actions.createEl("button", { text: this.opts.cancelText || "Cancel" });
+    const confirm = actions.createEl("button", { text: this.opts.confirmText || "Confirm" });
+    confirm.addClass(this.opts.danger ? "mod-warning" : "mod-cta");
+    cancel.addEventListener("click", () => this.finish(false));
+    confirm.addEventListener("click", () => this.finish(true));
+    window.setTimeout(() => confirm.focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (this.resolve) this.finish(false);
+  }
+}
+
 module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
@@ -278,6 +321,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.billingEnabled = !!data.billingEnabled;
     data.storageBlocked = !!data.storageBlocked;
     data.storageBlockedReason = typeof data.storageBlockedReason === "string" ? data.storageBlockedReason : "";
+    data.vaultList = Array.isArray(data.vaultList) ? data.vaultList : [];
     data.members = data.members.map((member) => {
       if (!member) return member;
       const role = member.role === "Admin" || member.role === "Owner" ? "Admin" : "Worker";
@@ -446,6 +490,129 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (folder instanceof TFolder && folder.children.length === 0) {
         try { await this.app.vault.trash(folder, false); } catch (error) { /* skip */ }
       }
+    }
+  }
+
+  // The vaults this user can access (owned + joined), for the switchable list.
+  async fetchVaultList() {
+    if (!this.data.signedIn || !this.data.authToken) return;
+    try {
+      const result = await this.api("/vaults");
+      if (Array.isArray(result.vaults)) {
+        this.data.vaultList = result.vaults;
+        await this.savePluginData();
+        this.refreshViews();
+      }
+    } catch (error) {
+      // non-fatal (offline / transient)
+    }
+  }
+
+  // Snapshot the mtime:size signature of every syncable local file into the upload
+  // cache, so the next incremental auto-sync treats them as already-synced and
+  // uploads NOTHING pre-existing. Used right after a switch's pull so leftover
+  // local-only files (and any file that resisted trashing) are never auto-pushed
+  // into the freshly-selected vault. Only genuine post-switch edits upload.
+  seedUploadSignaturesFromDisk() {
+    const sigs = {};
+    for (const file of this.app.vault.getFiles()) {
+      if (!file || isIgnoredPath(file.path)) continue;
+      sigs[file.path] = `${file.stat.mtime || 0}:${file.stat.size || 0}`;
+    }
+    this.uploadedSignatures = sigs;
+  }
+
+  // Switch which server vault this Obsidian vault mirrors. DESTRUCTIVE by design:
+  // the current vault's synced files are moved to Obsidian trash (recoverable) so
+  // the two vaults never intermingle, then the target is pulled in clean. No local
+  // push happens, so nothing from the old vault leaks into the new one.
+  async switchToVault(target) {
+    if (!this.data.signedIn) { new Notice("Sign in first."); return; }
+    if (!target || !target.vaultId) return;
+    if (target.vaultId === this.data.vaultId) { new Notice("That vault is already active."); return; }
+    // Claim the guard BEFORE the confirm so a second click / row can't open a
+    // parallel switch while this one's modal is up.
+    if (this.switchingVault) return;
+    this.switchingVault = true;
+
+    let started = false;
+    try {
+      const syncedCount = this.getRemoteKnownPaths().size;
+      const name = target.workspace || "the selected vault";
+      const confirmed = await new ConfirmModal(this.app, {
+        title: `Switch to ${target.workspace || "this vault"}?`,
+        body: `This device will sync ${name} from now on. ${syncedCount} file${syncedCount === 1 ? "" : "s"} synced from your current vault will be moved to Obsidian trash (recoverable), then ${name} is pulled in. This avoids the two vaults mixing together.`,
+        confirmText: "Switch vault",
+        danger: true,
+      }).openAndWait();
+      if (!confirmed) return; // finally just releases the guard; sync state untouched
+
+      started = true;
+      this.data.syncEnabled = false;
+      this.data.syncProgress = 0;
+
+      // Drain any in-flight background pull/auto-sync BEFORE we touch vaultId. A
+      // pull reads this.data.vaultId live, so if it resumed after the swap it
+      // would fetch/stamp the OLD vault's paths against the NEW vault id. With
+      // syncEnabled=false no NEW loop starts, so this bounded wait is enough.
+      let waited = 0;
+      while ((this.remotePullRunning || this.autoSyncRunning) && waited < 5000) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        waited += 50;
+      }
+
+      // 1) Trash the current vault's synced content so nothing intermingles.
+      const syncedPaths = this.getRemoteKnownPaths();
+      const syncedFolders = this.getRemoteKnownFolders();
+      this.wipingVault = true;
+      try {
+        await this.removeLocalVaultContent(syncedPaths, syncedFolders);
+      } catch (error) {
+        // best-effort; even if a file resists trashing we still switch below
+      } finally {
+        this.wipingVault = false;
+      }
+
+      // 2) Point at the target and reset EVERY sync baseline so no known-set /
+      // delete intent / hash cache from the old vault drives the new one.
+      this.data.vaultId = target.vaultId;
+      this.data.workspace = target.workspace || this.data.workspace;
+      this.data.role = target.role || "Worker";
+      this.data.vaultOwner = target.owner || "";
+      this.data.members = [];
+      this.data.remoteKnownPaths = [];
+      this.data.remoteKnownVaultId = "";
+      this.data.pendingDeletes = [];
+      this.data.remoteKnownFolders = [];
+      this.data.remoteKnownFoldersVaultId = "";
+      this.data.pendingFolderDeletes = [];
+      this.data.remoteUpdatedAt = "";
+      this.data.syncedHashes = {};
+      this.data.vaultStats.syncedFiles = 0;
+      this.uploadedSignatures = {};
+      this.dirtyUploadPaths = new Set();
+      await this.savePluginData();
+
+      // 3) Pull ONLY (no push) so the target mirrors down cleanly (empty known-set
+      // trashes nothing local), then seed the upload cache from disk so the first
+      // auto-sync doesn't push leftover local-only files into the target.
+      try {
+        await this.fetchVaultMembers();
+        await this.fetchPlan();
+        await this.pullLatest();
+        this.seedUploadSignaturesFromDisk();
+        new Notice(`Switched to ${this.data.workspace}. Sync is on.`);
+      } catch (error) {
+        this.seedUploadSignaturesFromDisk();
+        new Notice(`Switched vault, but the first pull failed: ${error.message}. It will retry automatically.`);
+      }
+    } finally {
+      if (started) this.data.syncEnabled = true;
+      this.data.syncProgress = 0;
+      this.switchingVault = false;
+      await this.savePluginData();
+      await this.fetchVaultList();
+      this.refreshViews();
     }
   }
 
@@ -1004,12 +1171,18 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this._lastAccessCheck = now;
       await this.fetchVaultMembers(); // GET /members; a 403 triggers markVaultAccessDenied
       await this.fetchPlan(); // keep plan/usage fresh while sync is paused
+      await this.fetchVaultList(); // keep the switchable vault list fresh
       return;
     }
 
     try {
       await this.registerVault();
       const manifest = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      // A vault switch can land while this poll is suspended on the awaits above
+      // (before pullLatest ever sets remotePullRunning, so the switch's drain
+      // can't see it). If the active vault changed underneath us, this manifest
+      // is stale — drop it rather than pull one vault's files against another.
+      if (this.switchingVault || (manifest.vaultId && manifest.vaultId !== this.data.vaultId)) return;
       this.applyStorageFromManifest(manifest);
       if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) return;
       await this.pullLatest({ manifest, silent: true });
@@ -1035,6 +1208,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
     try {
       await this.registerVault();
       const manifest = options.manifest || await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      // Guard against a stale manifest: a passed-in manifest (from a background
+      // poll) may belong to a vault we've since switched away from. Never stamp
+      // one vault's file list as another's baseline / trash across vaults.
+      if (manifest.vaultId && manifest.vaultId !== this.data.vaultId) return;
+      // Snapshot the vault this pull belongs to; if a switch swaps vaultId while
+      // we're mid-pull (e.g. a pull slower than the switch's drain window), bail
+      // before stamping the baseline so the new vault is never poisoned.
+      const pullVaultId = this.data.vaultId;
       this.applyStorageFromManifest(manifest);
       let pulledFiles = 0;
       let pulledBytes = 0;
@@ -1157,6 +1338,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
             // ignore individual delete failures; a later pull retries
           }
         }
+        // A switch swapped the active vault out from under this pull — abort
+        // before writing the baseline so we never tag the old vault's file list
+        // with the new vault's id.
+        if (this.data.vaultId !== pullVaultId) return;
         // New baseline is the server truth (the manifest).
         this.setRemoteKnownPaths(Array.from(remotePaths));
 
@@ -1391,6 +1576,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
       await this.fetchVaultMembers();
       await this.fetchPlan();
+      await this.fetchVaultList();
       await this.savePluginData();
       new Notice("Signed in with Google.");
     } catch (error) {
@@ -1519,6 +1705,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // Hand off to the continuous loops (poll pulls, auto-sync uploads).
       this.data.syncEnabled = true;
       await this.savePluginData();
+      await this.fetchVaultList();
       new Notice(`Joined ${this.data.workspace} as ${this.data.role}. Sync is on.`);
     } catch (error) {
       new Notice(`Could not join invite: ${error.message}`);

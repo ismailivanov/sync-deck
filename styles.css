@@ -787,3 +787,78 @@
   margin-top: 14px;
   margin-bottom: 0;
 }
+
+/* Vault list (switcher) */
+.sd-vault-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sd-vault-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 9px;
+  background: var(--background-primary);
+}
+
+.sd-vault-row.is-active {
+  border-color: var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+}
+
+.sd-vault-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sd-vault-nameline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sd-vault-nameline strong {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sd-vault-badge {
+  flex: none;
+  background: color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+  color: var(--interactive-accent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.sd-vault-meta {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.sd-vault-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 10px 0 0;
+  line-height: 1.4;
+}
+
+.sd-confirm-modal .sd-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
