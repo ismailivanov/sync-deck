@@ -157,8 +157,21 @@
 /* Terms gate */
 .sd-terms { text-align: left; }
 .sd-terms .sd-signedout-title, .sd-terms .sd-signedout-copy { text-align: left; }
-.sd-terms-points { margin: 2px 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
-.sd-terms-points li { font-size: 12.5px; line-height: 1.45; color: var(--text-muted); }
+.sd-terms-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 12px 0 4px;
+  padding: 11px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-normal);
+}
+.sd-terms-check input[type="checkbox"] { margin-top: 2px; flex: 0 0 auto; cursor: pointer; }
+.sd-terms .sd-primary-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 
 /* ---- Active vault card ---------------------------------------------------- */
 .sd-vault-card { display: flex; flex-direction: column; gap: 14px; }
