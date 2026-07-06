@@ -37,7 +37,11 @@ const DEFAULT_DATA = {
   remoteUpdatedAt: "",
   lastSync: "",
   storageUsedMb: 0,
-  storageLimitMb: 1024,
+  storageLimitMb: 100,
+  plan: "free",
+  boardLimit: 1,
+  storageBlocked: false,
+  storageBlockedReason: "",
   vaultStats: {
     totalFiles: 0,
     syncableFiles: 0,

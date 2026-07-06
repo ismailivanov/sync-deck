@@ -112,8 +112,46 @@ class SyncDeckView extends ItemView {
       textButton("key-round", "Join", () => this.plugin.joinInvite())
     );
 
-    panel.append(status, progress, rules, actions);
+    panel.append(status, progress, rules, this.renderStorageSection(), actions);
     return panel;
+  }
+
+  renderStorageSection() {
+    const data = this.plugin.data;
+    const used = Math.max(0, Number(data.storageUsedMb) || 0);
+    const limit = Number(data.storageLimitMb) > 0 ? Number(data.storageLimitMb) : 100;
+    const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
+    const pct = Math.round(ratio * 100);
+    const isPro = data.plan === "pro";
+
+    const wrap = createElement("div", "sd-storage");
+    const head = createElement("div", "sd-storage-head");
+    head.append(createElement("span", "sd-storage-label", "Storage"));
+    head.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
+    wrap.append(head);
+
+    const bar = createElement("div", "sd-storage-bar");
+    const fill = createElement("div", "sd-storage-fill");
+    fill.style.width = `${pct}%`;
+    if (ratio >= 0.9) fill.classList.add("is-full");
+    else if (ratio >= 0.7) fill.classList.add("is-warn");
+    bar.append(fill);
+    wrap.append(bar);
+
+    wrap.append(createElement("div", "sd-storage-meta", `${used} MB of ${limit} MB used`));
+
+    if (data.storageBlocked) {
+      wrap.append(createElement(
+        "div",
+        "sd-storage-warn",
+        data.storageBlockedReason === "server_full"
+          ? "Sync paused — the server is temporarily full. Your changes are safe locally and will upload later."
+          : "Sync paused — storage limit reached. Free up space or upgrade to Pro to keep syncing."
+      ));
+    } else if (!isPro && ratio >= 0.8) {
+      wrap.append(createElement("div", "sd-storage-hint", "Almost full — upgrade to Pro for more space."));
+    }
+    return wrap;
   }
 
   renderActivityPanel() {
