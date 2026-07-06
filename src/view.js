@@ -31,6 +31,7 @@ class SyncDeckView extends ItemView {
   async onOpen() {
     this.render();
     this.plugin.fetchVaultMembers();
+    this.plugin.fetchVaultList();
     // Keep the member list live-ish while the panel is open so an admin sees
     // workers join and a removed worker's own panel updates promptly.
     this.membersTimer = window.setInterval(() => this.plugin.fetchVaultMembers(), 8000);
@@ -65,8 +66,68 @@ class SyncDeckView extends ItemView {
     toolbar.append(title, actions);
 
     const layout = createElement("div", "sd-layout");
-    layout.append(this.renderSyncPanel(), this.renderMembersPanel(), this.renderActivityPanel());
+    layout.append(this.renderVaultsPanel(), this.renderSyncPanel(), this.renderMembersPanel(), this.renderActivityPanel());
     this.contentEl.append(toolbar, layout);
+  }
+
+  renderVaultsPanel() {
+    const data = this.plugin.data;
+    const panel = this.panel("Vaults", "layers", "sd-panel-vaults");
+
+    if (!data.signedIn) {
+      const empty = createElement("div", "sd-empty-state");
+      empty.append(
+        createElement("strong", "", "Sign in to see your vaults"),
+        createElement("span", "", "Your synced vaults appear here once you sign in.")
+      );
+      panel.append(empty);
+      return panel;
+    }
+
+    // Merge the server list with the active vault so the active one always shows,
+    // even if the server hid it (e.g. a brand-new empty personal vault).
+    const list = Array.isArray(data.vaultList) ? data.vaultList.slice() : [];
+    if (!list.some((v) => v.vaultId === data.vaultId)) {
+      list.unshift({
+        vaultId: data.vaultId,
+        workspace: data.workspace || "Current vault",
+        owner: data.vaultOwner || "",
+        role: data.role || "Admin",
+        fileCount: data.vaultStats.syncedFiles || 0,
+        sizeBytes: Math.round((data.storageUsedMb || 0) * 1024 * 1024),
+        memberCount: (data.members || []).length,
+      });
+    }
+    // Active first, then most-recently-updated.
+    list.sort((a, b) => (a.vaultId === data.vaultId ? -1 : b.vaultId === data.vaultId ? 1 : 0));
+
+    const container = createElement("div", "sd-vault-list");
+    list.forEach((v) => {
+      const isActive = v.vaultId === data.vaultId;
+      const row = createElement("div", `sd-vault-row${isActive ? " is-active" : ""}`);
+
+      const main = createElement("div", "sd-vault-main");
+      const nameLine = createElement("div", "sd-vault-nameline");
+      nameLine.append(createElement("strong", "", v.workspace || "Vault"));
+      if (isActive) nameLine.append(createElement("span", "sd-vault-badge", "Active"));
+      main.append(nameLine);
+      const files = v.fileCount || 0;
+      const meta = `${v.role || "Worker"} · ${files} file${files === 1 ? "" : "s"} · ${formatBytes(v.sizeBytes || 0)}`;
+      main.append(createElement("span", "sd-vault-meta", meta));
+      row.append(main);
+
+      if (!isActive) {
+        row.append(textButton("arrow-right-left", "Switch", () => this.plugin.switchToVault(v)));
+      }
+      container.append(row);
+    });
+
+    panel.append(container);
+    panel.append(createElement("p", "sd-vault-hint", "Switching moves the current vault's synced files to trash, then pulls the chosen one — so vaults never mix."));
+    const actions = createElement("div", "sd-panel-actions");
+    actions.append(textButton("refresh-cw", "Refresh", () => this.plugin.fetchVaultList()));
+    panel.append(actions);
+    return panel;
   }
 
   statusPill(text, tone) {

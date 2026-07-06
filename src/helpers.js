@@ -61,6 +61,7 @@ const DEFAULT_DATA = {
   recentFiles: [],
   members: [],
   activity: [],
+  vaultList: [],
 };
 
 function clone(value) {
