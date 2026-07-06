@@ -1,4 +1,4 @@
-const { MarkdownView, Modal, Notice, Plugin, TFile, TFolder, addIcon, setIcon } = require("obsidian");
+const { MarkdownView, Modal, Notice, Plugin, TFile, TFolder, addIcon, normalizePath, requestUrl, setIcon } = require("obsidian");
 const {
   DEFAULT_DATA,
   DEMO_MEMBER_EMAILS,
@@ -408,7 +408,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
     if (this.remotePollTimer) window.clearTimeout(this.remotePollTimer);
     if (this.editorPresence) this.editorPresence.stop();
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+    // Per Obsidian guidelines, don't detach leaves in onunload — they should
+    // restore in place across plugin updates.
   }
 
   async activateView() {
@@ -545,16 +546,24 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
   async api(path, options = {}) {
     const baseUrl = String(this.data.serverUrl || DEFAULT_DATA.serverUrl).replace(/\/+$/, "");
-    const response = await fetch(`${baseUrl}${path}`, {
+    // requestUrl (not fetch) so requests bypass CORS and work on Obsidian mobile.
+    const response = await requestUrl({
+      url: `${baseUrl}${path}`,
       method: options.method || "GET",
       headers: {
         "content-type": "application/json",
         ...(this.data.authToken ? { authorization: `Bearer ${this.data.authToken}` } : {}),
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
+      throw: false,
     });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
+    let body = {};
+    try {
+      body = response.json || {};
+    } catch (error) {
+      body = {};
+    }
+    if (response.status < 200 || response.status >= 300) {
       const error = new Error(body.error || `HTTP ${response.status}`);
       error.status = response.status;
       error.code = body.code || "";
@@ -1676,6 +1685,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
         this.data.syncedHashes = this.data.syncedHashes || {};
         for (const remoteFile of manifest.files || []) {
           if (!remoteFile.path || isIgnoredPath(remoteFile.path)) continue;
+          // Normalize server-supplied paths before any vault write (Obsidian guideline).
+          remoteFile.path = normalizePath(remoteFile.path);
           if (dirty.has(remoteFile.path)) continue;
 
           const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
@@ -1711,7 +1722,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (remoteFile.hash && !hadPriorHash && localFile instanceof TFile && knownHash !== undefined) {
             const remoteC = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
             const remoteContent = base64ToArrayBuffer(remoteC.contentBase64);
-            const conflictPath = this.conflictCopyPath(remoteFile.path);
+            const conflictPath = normalizePath(this.conflictCopyPath(remoteFile.path));
             await this.ensureParentFolder(conflictPath);
             this.pullTouchedPaths.add(conflictPath);
             await this.app.vault.createBinary(conflictPath, remoteContent);
