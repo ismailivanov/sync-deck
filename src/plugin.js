@@ -15,6 +15,11 @@ const { SyncDeckView } = require("./view");
 const { SyncDeckSettingTab } = require("./settings-tab");
 const { EditorPresence } = require("./editor-presence");
 
+// Terms of Service. Bump this date when TERMS.md changes materially — users are
+// re-prompted to accept when their accepted version != the current one.
+const CURRENT_TERMS_VERSION = "2026-07-06";
+const TERMS_URL = "https://github.com/ismailivanov/sync-deck/blob/main/TERMS.md";
+
 const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
 const REMOTE_POLL_ACTIVE_MS = 400; // fast poll while collaborating on the open file
 const ACCESS_CHECK_INTERVAL_MS = 10000; // while sync is paused, re-verify vault membership this often
@@ -430,6 +435,26 @@ module.exports = class SyncDeckPlugin extends Plugin {
     });
   }
 
+  // ---- Terms of Service gate ------------------------------------------------
+  hasAcceptedTerms() {
+    return this.data.termsAcceptedVersion === CURRENT_TERMS_VERSION;
+  }
+
+  async acceptTerms() {
+    this.data.termsAcceptedVersion = CURRENT_TERMS_VERSION;
+    await this.savePluginData();
+    this.refreshViews();
+    new Notice("Thanks — you're all set.");
+  }
+
+  declineTerms() {
+    new Notice("You need to accept the terms to use Sync Deck.");
+  }
+
+  openTermsPage() {
+    window.open(TERMS_URL);
+  }
+
   normalizeData(data) {
     data.user = Object.assign(clone(DEFAULT_DATA.user), data.user || {});
     data.serverUrl = data.serverUrl || DEFAULT_DATA.serverUrl;
@@ -474,6 +499,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.billingEnabled = !!data.billingEnabled;
     data.billingYearly = !!data.billingYearly;
     data.onboarded = !!data.onboarded;
+    data.termsAcceptedVersion = typeof data.termsAcceptedVersion === "string" ? data.termsAcceptedVersion : "";
     // "First-sync choice made for the active vault." Grandfather anyone who has
     // already synced (lastSync set) so the upgrade never re-prompts them.
     data.vaultInitialized = !!data.vaultInitialized || !!data.lastSync;
@@ -1568,6 +1594,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async pollRemoteChanges() {
+    if (!this.hasAcceptedTerms()) return; // no service use until the terms are accepted
     if (!this.data.signedIn) return;
     if (this.autoSyncRunning || this.remotePullRunning) return;
 
@@ -1935,6 +1962,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   scheduleAutoSync() {
+    if (!this.hasAcceptedTerms()) return; // no uploads until the terms are accepted
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
     this.autoSyncTimer = window.setTimeout(async () => {
       this.autoSyncTimer = null;
@@ -1958,6 +1986,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async signIn() {
+    if (!this.hasAcceptedTerms()) { this.declineTerms(); return; }
     try {
       const start = await this.api("/auth/google/start");
       if (!start.authUrl || !start.state) throw new Error("Google sign in did not start");

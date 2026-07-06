@@ -48,6 +48,7 @@ const DEFAULT_DATA = {
   billingEnabled: false,
   billingYearly: false,
   onboarded: false,
+  termsAcceptedVersion: "",
   storageBlocked: false,
   storageBlockedReason: "",
   vaultStats: {
@@ -229,7 +230,9 @@ class SyncDeckView extends ItemView {
     const shell = createElement("div", "sd-shell");
     shell.append(this.renderHeader());
 
-    if (!data.signedIn) {
+    if (!this.plugin.hasAcceptedTerms()) {
+      shell.append(this.renderTermsGate());
+    } else if (!data.signedIn) {
       shell.append(this.renderSignedOut());
     } else if (!data.vaultInitialized) {
       // No vault open yet — a vault system: pick one to open, or create a new one.
@@ -275,6 +278,26 @@ class SyncDeckView extends ItemView {
     }
     header.append(account);
     return header;
+  }
+
+  renderTermsGate() {
+    const wrap = createElement("div", "sd-card sd-signedout sd-terms");
+    wrap.append(createElement("h3", "sd-signedout-title", "Before you start"));
+    wrap.append(createElement("p", "sd-signedout-copy", "Please review and accept Sync Deck's terms to continue."));
+    const points = createElement("ul", "sd-terms-points");
+    [
+      "Sync Deck syncs your notes through a hosted cloud service.",
+      "No end-to-end encryption yet — don't sync passwords, secrets, or other people's personal data.",
+      "Provided “as is”, with no warranty; the service can change or stop at any time. Keep your own backups — your notes always stay on your device.",
+      "We store the files you sync plus your Google account email and name. We never sell your data.",
+    ].forEach((t) => points.append(createElement("li", "", t)));
+    wrap.append(points);
+    wrap.append(textButton("external-link", "Read the full terms", () => this.plugin.openTermsPage(), "sd-ghost-btn sd-block-btn"));
+    const actions = createElement("div", "sd-actions-row");
+    actions.append(textButton("check", "I accept", () => this.plugin.acceptTerms(), "sd-primary-btn sd-grow"));
+    actions.append(textButton("x", "Decline", () => this.plugin.declineTerms(), "sd-grow"));
+    wrap.append(actions);
+    return wrap;
   }
 
   renderSignedOut() {
@@ -1053,6 +1076,11 @@ const { SyncDeckView } = __require("src/view.js");
 const { SyncDeckSettingTab } = __require("src/settings-tab.js");
 const { EditorPresence } = __require("src/editor-presence.js");
 
+// Terms of Service. Bump this date when TERMS.md changes materially — users are
+// re-prompted to accept when their accepted version != the current one.
+const CURRENT_TERMS_VERSION = "2026-07-06";
+const TERMS_URL = "https://github.com/ismailivanov/sync-deck/blob/main/TERMS.md";
+
 const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
 const REMOTE_POLL_ACTIVE_MS = 400; // fast poll while collaborating on the open file
 const ACCESS_CHECK_INTERVAL_MS = 10000; // while sync is paused, re-verify vault membership this often
@@ -1468,6 +1496,26 @@ module.exports = class SyncDeckPlugin extends Plugin {
     });
   }
 
+  // ---- Terms of Service gate ------------------------------------------------
+  hasAcceptedTerms() {
+    return this.data.termsAcceptedVersion === CURRENT_TERMS_VERSION;
+  }
+
+  async acceptTerms() {
+    this.data.termsAcceptedVersion = CURRENT_TERMS_VERSION;
+    await this.savePluginData();
+    this.refreshViews();
+    new Notice("Thanks — you're all set.");
+  }
+
+  declineTerms() {
+    new Notice("You need to accept the terms to use Sync Deck.");
+  }
+
+  openTermsPage() {
+    window.open(TERMS_URL);
+  }
+
   normalizeData(data) {
     data.user = Object.assign(clone(DEFAULT_DATA.user), data.user || {});
     data.serverUrl = data.serverUrl || DEFAULT_DATA.serverUrl;
@@ -1512,6 +1560,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.billingEnabled = !!data.billingEnabled;
     data.billingYearly = !!data.billingYearly;
     data.onboarded = !!data.onboarded;
+    data.termsAcceptedVersion = typeof data.termsAcceptedVersion === "string" ? data.termsAcceptedVersion : "";
     // "First-sync choice made for the active vault." Grandfather anyone who has
     // already synced (lastSync set) so the upgrade never re-prompts them.
     data.vaultInitialized = !!data.vaultInitialized || !!data.lastSync;
@@ -2606,6 +2655,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async pollRemoteChanges() {
+    if (!this.hasAcceptedTerms()) return; // no service use until the terms are accepted
     if (!this.data.signedIn) return;
     if (this.autoSyncRunning || this.remotePullRunning) return;
 
@@ -2973,6 +3023,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   scheduleAutoSync() {
+    if (!this.hasAcceptedTerms()) return; // no uploads until the terms are accepted
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
     this.autoSyncTimer = window.setTimeout(async () => {
       this.autoSyncTimer = null;
@@ -2996,6 +3047,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   async signIn() {
+    if (!this.hasAcceptedTerms()) { this.declineTerms(); return; }
     try {
       const start = await this.api("/auth/google/start");
       if (!start.authUrl || !start.state) throw new Error("Google sign in did not start");

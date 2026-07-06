@@ -65,7 +65,9 @@ class SyncDeckView extends ItemView {
     const shell = createElement("div", "sd-shell");
     shell.append(this.renderHeader());
 
-    if (!data.signedIn) {
+    if (!this.plugin.hasAcceptedTerms()) {
+      shell.append(this.renderTermsGate());
+    } else if (!data.signedIn) {
       shell.append(this.renderSignedOut());
     } else if (!data.vaultInitialized) {
       // No vault open yet — a vault system: pick one to open, or create a new one.
@@ -111,6 +113,26 @@ class SyncDeckView extends ItemView {
     }
     header.append(account);
     return header;
+  }
+
+  renderTermsGate() {
+    const wrap = createElement("div", "sd-card sd-signedout sd-terms");
+    wrap.append(createElement("h3", "sd-signedout-title", "Before you start"));
+    wrap.append(createElement("p", "sd-signedout-copy", "Please review and accept Sync Deck's terms to continue."));
+    const points = createElement("ul", "sd-terms-points");
+    [
+      "Sync Deck syncs your notes through a hosted cloud service.",
+      "No end-to-end encryption yet — don't sync passwords, secrets, or other people's personal data.",
+      "Provided “as is”, with no warranty; the service can change or stop at any time. Keep your own backups — your notes always stay on your device.",
+      "We store the files you sync plus your Google account email and name. We never sell your data.",
+    ].forEach((t) => points.append(createElement("li", "", t)));
+    wrap.append(points);
+    wrap.append(textButton("external-link", "Read the full terms", () => this.plugin.openTermsPage(), "sd-ghost-btn sd-block-btn"));
+    const actions = createElement("div", "sd-actions-row");
+    actions.append(textButton("check", "I accept", () => this.plugin.acceptTerms(), "sd-primary-btn sd-grow"));
+    actions.append(textButton("x", "Decline", () => this.plugin.declineTerms(), "sd-grow"));
+    wrap.append(actions);
+    return wrap;
   }
 
   renderSignedOut() {
