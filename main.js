@@ -336,8 +336,10 @@ class SyncDeckView extends ItemView {
       headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
     }
     if (ownsActive) {
-      // Owner can delete the open vault (returns to no-vault state; files kept).
-      headActions.append(textButton("trash-2", "", () => this.plugin.deleteVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
+      // Owner: close (stop syncing here, keep the vault) OR delete (remove for all).
+      const ownerRef = { vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner || data.user.email };
+      headActions.append(textButton("log-out", "", () => this.plugin.leaveVault(ownerRef), "sd-icon-btn"));
+      headActions.append(textButton("trash-2", "", () => this.plugin.deleteVault(ownerRef), "sd-icon-btn sd-danger"));
     } else {
       // A member (worker) can leave the vault they joined; their local files stay.
       headActions.append(textButton("log-out", "", () => this.plugin.leaveVault({ vaultId: data.vaultId, workspace: data.workspace, owner: data.vaultOwner }), "sd-icon-btn sd-danger"));
@@ -1875,41 +1877,49 @@ module.exports = class SyncDeckPlugin extends Plugin {
   // Leave a vault you're a member of (not the owner). Local files are KEPT — if
   // it's the active vault you detach to a fresh empty vault and keep working
   // locally. Non-owners only; the owner deletes instead.
+  // Leave a vault, keeping your local files. For a MEMBER this removes them from
+  // the vault server-side. For the OWNER it's a local "close" — the vault stays
+  // on the server (still theirs, members intact); they just stop syncing it here
+  // and return to the no-vault state, and can re-open it any time.
   async leaveVault(vault) {
     if (!this.data.signedIn || !vault || !vault.vaultId) return;
-    if (vault.owner && vault.owner === this.data.user.email) { new Notice("You own this vault — delete it instead of leaving."); return; }
+    const isOwner = vault.owner && vault.owner === this.data.user.email;
     const leavingId = vault.vaultId;
     const isActive = leavingId === this.data.vaultId;
     const name = vault.workspace || "this vault";
     const confirmed = await new ConfirmModal(this.app, {
-      title: `Leave ${name}?`,
-      body: isActive
-        ? `You'll stop syncing ${name}. Your local files stay exactly as they are — keep working on them offline. You can rejoin later only with a new invite.`
-        : `You'll leave ${name}. You can rejoin later only with a new invite.`,
-      confirmText: "Leave vault",
-      danger: true,
+      title: isOwner ? `Close ${name}?` : `Leave ${name}?`,
+      body: isOwner
+        ? `This device stops syncing ${name} and returns to no open vault. Your local files are kept, and the vault stays on the server (still yours, members intact) — open it again any time.`
+        : (isActive
+          ? `You'll stop syncing ${name} and leave it. Your local files stay exactly as they are. You can rejoin later only with a new invite.`
+          : `You'll leave ${name}. You can rejoin later only with a new invite.`),
+      confirmText: isOwner ? "Close vault" : "Leave vault",
+      danger: !isOwner,
     }).openAndWait();
     if (!confirmed) return;
 
-    // Detach FIRST (clears the known-set) so no in-flight poll can trash files
-    // once /leave makes the server return access-denied for the old vault.
+    // Detach FIRST (clears the known-set) so no in-flight poll can trash files.
     if (isActive) {
       this.detachToEmptyVault();
       await this.savePluginData();
       this.refreshViews();
     }
-    try {
-      await this.api(`/vaults/${encodeURIComponent(leavingId)}/leave`, { method: "POST" });
-    } catch (error) {
-      new Notice(isActive
-        ? `Left ${name} on this device (files kept), but the server didn't confirm: ${error.message}`
-        : `Could not leave: ${error.message}`);
-      await this.fetchVaultList();
-      return;
+    // Members drop their server membership; the owner keeps it (local close only).
+    if (!isOwner) {
+      try {
+        await this.api(`/vaults/${encodeURIComponent(leavingId)}/leave`, { method: "POST" });
+      } catch (error) {
+        new Notice(isActive
+          ? `Left ${name} on this device (files kept), but the server didn't confirm: ${error.message}`
+          : `Could not leave: ${error.message}`);
+        await this.fetchVaultList();
+        return;
+      }
     }
     await this.fetchVaultList();
     this.refreshViews();
-    new Notice(`Left ${name}. Your local files are untouched.`);
+    new Notice(isOwner ? `Closed ${name}. Your local files are kept.` : `Left ${name}. Your local files are untouched.`);
   }
 
   // The vaults this user can access (owned + joined), for the switchable list.
