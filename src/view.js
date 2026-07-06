@@ -119,7 +119,8 @@ class SyncDeckView extends ItemView {
   renderStorageSection() {
     const data = this.plugin.data;
     const used = Math.max(0, Number(data.storageUsedMb) || 0);
-    const limit = Number(data.storageLimitMb) > 0 ? Number(data.storageLimitMb) : 100;
+    const limit = Number(data.storageLimitMb) > 0 ? Number(data.storageLimitMb) : 250;
+    const fileMb = Number(data.fileLimitMb) > 0 ? Number(data.fileLimitMb) : 10;
     const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
     const pct = Math.round(ratio * 100);
     const isPro = data.plan === "pro";
@@ -138,7 +139,7 @@ class SyncDeckView extends ItemView {
     bar.append(fill);
     wrap.append(bar);
 
-    wrap.append(createElement("div", "sd-storage-meta", `${used} MB of ${limit} MB used`));
+    wrap.append(createElement("div", "sd-storage-meta", `${used} MB of ${limit} MB used · ${fileMb} MB/file`));
 
     if (data.storageBlocked) {
       wrap.append(createElement(
@@ -150,6 +151,13 @@ class SyncDeckView extends ItemView {
       ));
     } else if (!isPro && ratio >= 0.8) {
       wrap.append(createElement("div", "sd-storage-hint", "Almost full — upgrade to Pro for more space."));
+    }
+
+    // Upgrade CTA for Free users (only when billing is live on the server).
+    if (!isPro && data.billingEnabled) {
+      const upgrade = textButton("sparkles", "Upgrade to Pro", () => this.plugin.startUpgrade());
+      upgrade.classList.add("sd-upgrade-btn");
+      wrap.append(upgrade);
     }
     return wrap;
   }

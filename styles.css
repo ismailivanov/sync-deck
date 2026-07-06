@@ -655,3 +655,16 @@
   font-weight: 700;
   color: var(--interactive-accent);
 }
+
+.sd-upgrade-btn {
+  margin-top: 2px;
+  justify-content: center;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+  font-weight: 800;
+}
+
+.sd-upgrade-btn:hover {
+  background: var(--interactive-accent-hover);
+}

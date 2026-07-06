@@ -4,7 +4,6 @@ const {
   DEMO_MEMBER_EMAILS,
   ICON_ID,
   ICON_SVG,
-  MAX_SYNC_FILE_SIZE,
   VIEW_TYPE,
   clone,
   isIgnoredPath,
@@ -212,7 +211,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
     // for Task Deck's board gate).
     data.plan = data.plan === "pro" ? "pro" : "free";
     data.storageLimitMb = Number(data.storageLimitMb) > 0 ? Number(data.storageLimitMb) : DEFAULT_DATA.storageLimitMb;
+    data.fileLimitMb = Number(data.fileLimitMb) > 0 ? Number(data.fileLimitMb) : DEFAULT_DATA.fileLimitMb;
     data.boardLimit = data.boardLimit === null || Number.isFinite(Number(data.boardLimit)) ? data.boardLimit : DEFAULT_DATA.boardLimit;
+    data.billingEnabled = !!data.billingEnabled;
     data.storageBlocked = !!data.storageBlocked;
     data.storageBlockedReason = typeof data.storageBlockedReason === "string" ? data.storageBlockedReason : "";
     data.members = data.members.map((member) => {
@@ -434,13 +435,35 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (me.plan) this.data.plan = me.plan === "pro" ? "pro" : "free";
       if (me.limits) {
         if (Number(me.limits.storageBytes) > 0) this.data.storageLimitMb = Math.round(Number(me.limits.storageBytes) / 1024 / 1024);
+        if (Number(me.limits.fileBytes) > 0) this.data.fileLimitMb = Math.round(Number(me.limits.fileBytes) / 1024 / 1024);
         if (me.limits.boardLimit === null || Number.isFinite(Number(me.limits.boardLimit))) this.data.boardLimit = me.limits.boardLimit;
       }
       if (me.usage && Number(me.usage.storageBytes) >= 0) this.data.storageUsedMb = Math.round(Number(me.usage.storageBytes) / 1024 / 1024);
+      this.data.billingEnabled = !!me.billingEnabled;
       await this.savePluginData();
       this.refreshViews();
     } catch (error) {
       // non-fatal (offline / transient)
+    }
+  }
+
+  // Open Stripe Checkout for Sync Deck Pro in the browser. The server creates the
+  // session; Stripe's webhook flips the plan to Pro on payment, and the next
+  // /me / manifest poll refreshes the panel.
+  async startUpgrade() {
+    if (!this.data.signedIn) { new Notice("Sign in first."); return; }
+    try {
+      const result = await this.api("/billing/checkout", { method: "POST" });
+      if (result && result.url) {
+        window.open(result.url);
+        new Notice("Opening secure checkout in your browser…");
+      } else {
+        new Notice("Upgrade is not available right now.");
+      }
+    } catch (error) {
+      new Notice(error && error.status === 404
+        ? "Upgrades aren't enabled yet. Please try again later."
+        : `Could not start upgrade: ${error.message}`);
     }
   }
 
@@ -508,7 +531,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
         stats.ignoredFiles += 1;
         continue;
       }
-      if (size > MAX_SYNC_FILE_SIZE) {
+      if (size > this.fileLimitBytes()) {
         stats.oversizedFiles += 1;
         continue;
       }
@@ -686,8 +709,16 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (Number(storage.limitBytes) > 0) this.data.storageLimitMb = Math.round(Number(storage.limitBytes) / 1024 / 1024);
     if (Number(storage.usedBytes) >= 0) this.data.storageUsedMb = Math.round(Number(storage.usedBytes) / 1024 / 1024);
     if (storage.boardLimit === null || Number.isFinite(Number(storage.boardLimit))) this.data.boardLimit = storage.boardLimit;
+    if (Number(storage.fileBytes) > 0) this.data.fileLimitMb = Math.round(Number(storage.fileBytes) / 1024 / 1024);
     // Server confirms we're under quota -> lift any stale local block.
     if (this.data.storageBlocked && Number(storage.usedBytes) < Number(storage.limitBytes)) this.clearStorageBlock();
+  }
+
+  // Per-file sync cap for the ACTIVE vault's owner plan (Free 10 MB / Pro 250 MB).
+  // Server-authoritative via the manifest / /me; defaults to the Free cap.
+  fileLimitBytes() {
+    const mb = Number(this.data.fileLimitMb) > 0 ? Number(this.data.fileLimitMb) : 10;
+    return mb * 1024 * 1024;
   }
 
   async uploadVaultFiles(files, options = {}) {
@@ -1229,7 +1260,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     else dropPendingDelete(path); // create/modify => the file exists; cancel any stale delete intent
 
     const size = file instanceof TFile ? file.stat.size || 0 : 0;
-    if (size > MAX_SYNC_FILE_SIZE) {
+    if (size > this.fileLimitBytes()) {
       this.pushQueueItem("skip", path, size, "too large", oldPath);
     } else {
       this.pushQueueItem(action, path, size, "pending", oldPath);
