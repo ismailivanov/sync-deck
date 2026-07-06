@@ -42,6 +42,7 @@ const DEFAULT_DATA = {
   plan: "free",
   boardLimit: 1,
   billingEnabled: false,
+  billingYearly: false,
   storageBlocked: false,
   storageBlockedReason: "",
   vaultStats: {
