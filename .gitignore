@@ -7,3 +7,4 @@ server/storage/
 .claude/launch.json
 docs/DEVELOPMENT_PLAN.md
 syncdeck-private/
+server/
