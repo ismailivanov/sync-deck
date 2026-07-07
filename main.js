@@ -3202,6 +3202,26 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
     try {
       const result = await this.api(`/invites/${encodeURIComponent(code.trim())}/accept`, { method: "POST" });
+
+      // You're joining someone else's vault. Decide what happens to the files
+      // already in this Obsidian vault: start clean (move them to the recoverable
+      // trash and see only the shared vault), or bring them along (upload into the
+      // shared vault). Default is clean — most people join to work on the vault,
+      // not to push their own notes into it.
+      const localCount = this.collectSyncableFiles().length;
+      let joinChoice = "empty";
+      if (localCount > 0) {
+        joinChoice = await new ChoiceModal(this.app, {
+          title: `Join ${result.workspace || "vault"}`,
+          body: `You have ${localCount} file${localCount === 1 ? "" : "s"} in this Obsidian vault. Start clean — move them to Obsidian trash (recoverable) and see only ${result.workspace || "the vault"}'s files — or add your files to the shared vault.`,
+          choices: [
+            { key: "empty", label: "Start clean (my files to trash)", cta: true },
+            { key: "add", label: `Add my ${localCount} file${localCount === 1 ? "" : "s"} to the vault` },
+          ],
+        }).openAndWait();
+        if (joinChoice === null) return; // cancelled — don't set up locally
+      }
+
       this.data.vaultId = result.vaultId;
       this.data.workspace = result.workspace || this.data.workspace;
       this.data.role = result.role || "Worker";
@@ -3239,11 +3259,24 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
       await this.savePluginData();
       await this.fetchVaultMembers();
-      // Two-way first pass so the vault is usable right away: pull the shared
-      // files down (known-set is empty, so nothing local is trashed), then push
-      // our own local files into the vault.
+      // Start clean: move the user's OWN local files to the recoverable trash
+      // BEFORE pulling, so they land on just the shared vault's content.
+      if (joinChoice === "empty") {
+        const localPaths = new Set(this.collectSyncableFiles().map((file) => file.path));
+        const localFolders = this.getVaultFolders();
+        this.wipingVault = true;
+        try {
+          await this.removeLocalVaultContent(localPaths, localFolders);
+        } catch (error) {
+          // best-effort
+        } finally {
+          this.wipingVault = false;
+        }
+      }
+      // Pull the shared files down (known-set is empty, so nothing pulled is
+      // trashed). Only push our own files into the vault if the user chose to.
       await this.pullLatest();
-      await this.scanVault({ upload: true });
+      if (joinChoice === "add") await this.scanVault({ upload: true });
       // Hand off to the continuous loops (poll pulls, auto-sync uploads).
       this.data.syncEnabled = true;
       await this.savePluginData();
