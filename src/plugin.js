@@ -2168,6 +2168,16 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // interleave an upload into our pull. We enable continuous sync only after
       // the merge pass has fully, sequentially completed.
       this.data.syncEnabled = false;
+      // Drain any in-flight background pull/auto-sync from the PREVIOUS vault
+      // before our own pull. Otherwise pullLatest()'s `remotePullRunning` guard
+      // turns the join's initial pull into a no-op, the shared files are never
+      // recorded in the baseline (remoteKnownPaths), and a later "leave" can't
+      // trash them. (switchToVault drains for the same reason; join must too.)
+      let joinDrain = 0;
+      while ((this.remotePullRunning || this.autoSyncRunning) && joinDrain < 5000) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        joinDrain += 50;
+      }
       await this.savePluginData();
       await this.fetchVaultMembers();
       // Two-way first pass so the vault is usable right away: pull the shared
