@@ -398,9 +398,22 @@ module.exports = class SyncDeckPlugin extends Plugin {
       name: "Open Sync Deck",
       callback: () => this.activateView(),
     });
+    // Pull-before-push guard: after opening (or switching/joining) a vault, the
+    // first upload is held until a poll/pull confirms the server's current state,
+    // so a device with stale local files can't overwrite newer changes another
+    // member already pushed. Flipped true by markPulledSinceOpen().
+    this.pulledSinceOpen = false;
     this.startRemotePolling();
     this.editorPresence = new EditorPresence(this);
     this.editorPresence.start();
+  }
+
+  // We've confirmed the server's current state at least once for this vault:
+  // uploads are now safe, and any deferred local change is flushed.
+  markPulledSinceOpen() {
+    if (this.pulledSinceOpen) return;
+    this.pulledSinceOpen = true;
+    this.scheduleAutoSync();
   }
 
   onunload() {
@@ -869,6 +882,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.syncedHashes = {};
     this.uploadedSignatures = {};
     this.dirtyUploadPaths = new Set();
+    // A fresh vault association: don't push until we've pulled its current state.
+    this.pulledSinceOpen = false;
   }
 
   // Leave a vault you're a member of (not the owner). Local files are KEPT — if
@@ -1036,6 +1051,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.vaultStats.syncedFiles = 0;
       this.uploadedSignatures = {};
       this.dirtyUploadPaths = new Set();
+      this.pulledSinceOpen = false; // new vault: pull before any push
       await this.savePluginData();
 
       // 3) Pull ONLY (no push) so the target mirrors down cleanly (empty known-set
@@ -1632,6 +1648,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // is stale — drop it rather than pull one vault's files against another.
       if (this.switchingVault || (manifest.vaultId && manifest.vaultId !== this.data.vaultId)) return;
       this.applyStorageFromManifest(manifest);
+      // We've now seen the server's current state — safe to push. (This also
+      // covers the "already up to date" case below where no pull is needed.)
+      this.markPulledSinceOpen();
       if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) return;
       await this.pullLatest({ manifest, silent: true });
     } catch (error) {
@@ -1849,6 +1868,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.serverStatus = "online";
       this.data.remoteUpdatedAt = manifest.updatedAt || this.data.remoteUpdatedAt;
       this.data.lastSync = new Date().toLocaleString();
+      this.markPulledSinceOpen(); // a direct pull (switch/join/manual) also confirms server state
       this.pushQueueItem("pull", "Remote vault", pulledBytes, "done");
       await this.scanVault();
       if (!options.silent) {
@@ -1982,6 +2002,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // Never run an upload while a pull is in flight: both mutate remoteKnownPaths
       // and an interleave can misread a just-uploaded file as a remote deletion.
       if (this.autoSyncRunning || this.remotePullRunning) return this.scheduleAutoSync();
+      // Hold the FIRST upload after opening until a poll/pull has confirmed the
+      // server's current state, so stale local files can't clobber newer remote
+      // changes. The poll flips pulledSinceOpen and re-triggers this via
+      // markPulledSinceOpen(), so we simply wait here.
+      if (!this.pulledSinceOpen) return;
 
       this.autoSyncRunning = true;
       try {
