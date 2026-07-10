@@ -694,9 +694,37 @@ module.exports = class SyncDeckPlugin extends Plugin {
     for (const fp of foldersDeepFirst) {
       if (!fp || fp.startsWith(".") || isIgnoredPath(`${fp}/`)) continue;
       const folder = this.app.vault.getAbstractFileByPath(fp);
-      if (folder instanceof TFolder && folder.children.length === 0) {
+      if (!(folder instanceof TFolder)) continue;
+      // Deepest-first order means a child folder is already gone from disk before
+      // we test its parent, so a nested tree collapses in one pass.
+      if (await this.isSyncedFolderEmptyOnDisk(fp)) {
         try { await this.app.vault.trash(folder, false); } catch (error) { /* skip */ }
       }
+    }
+  }
+
+  // True when a folder holds no real files or subfolders left ON DISK. Read from
+  // the adapter, NOT from TFolder.children: vault.trash() moves a file to .trash
+  // asynchronously and the in-memory children array frequently still lists the
+  // just-trashed file, so a `children.length === 0` test saw an emptied folder as
+  // non-empty and left it behind — the user then had to delete the stranded
+  // folders by hand. Returns false if the folder is already gone or unreadable.
+  async isSyncedFolderEmptyOnDisk(folderPath) {
+    try {
+      const listing = await this.app.vault.adapter.list(folderPath);
+      // ANY remaining subfolder means "not empty": adapter.list is non-recursive,
+      // so a leftover subfolder (even a hidden one like .archive) may hold real
+      // files we can't see here — never trash the parent whole in that case. On a
+      // switch/wipe the synced children are trashed deepest-first, so a subfolder
+      // still present here is the user's own, un-synced, and must be preserved.
+      if ((listing.folders || []).length > 0) return false;
+      // For files, ignore ONLY known OS junk (not every dotfile — a user's hidden
+      // note must still count as real content and keep its folder alive).
+      const JUNK = new Set([".DS_Store", "Thumbs.db", ".localized"]);
+      const realFiles = (listing.files || []).filter((p) => !JUNK.has(p.split("/").pop()));
+      return realFiles.length === 0;
+    } catch (error) {
+      return false;
     }
   }
 
@@ -1847,15 +1875,16 @@ module.exports = class SyncDeckPlugin extends Plugin {
           for (const folderPath of removeFolders) {
             if (!folderPath || folderPath.startsWith(".") || isIgnoredPath(`${folderPath}/`)) continue;
             const folder = this.app.vault.getAbstractFileByPath(folderPath);
-            if (folder instanceof TFolder && folder.children.length === 0) {
+            if (!(folder instanceof TFolder)) continue; // already gone; drop from known
+            if (await this.isSyncedFolderEmptyOnDisk(folderPath)) {
               try {
                 this.pullTouchedPaths.add(folderPath);
                 await this.app.vault.trash(folder, false);
               } catch (error) {
                 retainForRetry.add(folderPath); // trash failed; retry next pull
               }
-            } else if (folder instanceof TFolder) {
-              retainForRetry.add(folderPath); // not empty yet; retry next pull
+            } else {
+              retainForRetry.add(folderPath); // still holds a kept/dirty file; retry next pull
             }
           }
           this.setRemoteKnownFolders([...remoteFolders, ...retainForRetry]);
