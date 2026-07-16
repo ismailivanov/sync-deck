@@ -36,14 +36,22 @@ Module._load = originalLoad;
 
 async function main() {
   const plugin = Object.create(SyncDeckPlugin.prototype);
-  plugin.app = { vault: { getName: () => "Test" } };
+  plugin.app = { vault: { getName: () => "Test", getFiles: () => [] } };
   plugin.data = plugin.normalizeData({
     vaultId: "vault-test",
     pendingUploads: ["Board/card.md", "Board/card.md", ".obsidian/plugins/nope.js", null],
   });
   assert.deepStrictEqual(plugin.data.pendingUploads, ["Board/card.md"]);
 
+  plugin.data.pendingUploads = [];
+  plugin.dirtyUploadPaths = new Set();
+  plugin.pulledSinceOpen = false;
   let scheduled = false;
+  plugin.scheduleAutoSync = () => { scheduled = true; };
+  plugin.markPulledSinceOpen();
+  assert(!scheduled, "opening a clean vault must not trigger a full upload");
+
+  scheduled = false;
   plugin.data.syncEnabled = true;
   plugin.fileLimitBytes = () => 1024;
   plugin.scheduleAutoSync = () => { scheduled = true; };
@@ -66,10 +74,28 @@ async function main() {
   plugin.registerVault = async () => {};
   plugin.api = async () => ({ vaultId: "vault-test", updatedAt: "same", files: [] });
   plugin.applyStorageFromManifest = () => {};
-  plugin.markPulledSinceOpen = () => {};
   plugin.scheduleAutoSync = () => { scheduled = true; };
+  plugin.pulledSinceOpen = false;
   await plugin.pollRemoteChanges();
   assert(scheduled, "durable deletes must re-arm auto-sync on a steady manifest");
+
+  let pullCalled = false;
+  scheduled = false;
+  plugin.pulledSinceOpen = false;
+  Object.assign(plugin.data, {
+    remoteUpdatedAt: "old",
+    pendingUploads: [],
+    pendingDeletes: [],
+    pendingFolderDeletes: [],
+  });
+  plugin.api = async () => ({ vaultId: "vault-test", updatedAt: "new", files: [] });
+  plugin.pullLatest = async () => {
+    pullCalled = true;
+    assert(!plugin.pulledSinceOpen, "push gate must stay closed until changed remote content is pulled");
+  };
+  await plugin.pollRemoteChanges();
+  assert(pullCalled);
+  assert(!scheduled);
 
   console.log("sync retry checks passed");
 }
