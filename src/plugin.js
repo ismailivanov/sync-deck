@@ -414,10 +414,22 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
   // We've confirmed the server's current state at least once for this vault:
   // uploads are now safe, and any deferred local change is flushed.
+  hasPendingSyncWork() {
+    return !!((this.dirtyUploadPaths && this.dirtyUploadPaths.size)
+      || (this.data.pendingUploads && this.data.pendingUploads.length)
+      || (this.data.pendingDeletes && this.data.pendingDeletes.length)
+      || (this.data.pendingFolderDeletes && this.data.pendingFolderDeletes.length));
+  }
+
   markPulledSinceOpen() {
     if (this.pulledSinceOpen) return;
+    // The first successful server check/pull establishes the disk baseline for
+    // incremental uploads. Persisted dirty paths still override these signatures.
+    this.seedUploadSignaturesFromDisk();
     this.pulledSinceOpen = true;
-    this.scheduleAutoSync();
+    // Never full-upload a vault merely because the app opened. That stale-device
+    // upload could revert a newer server copy after a failed first pull.
+    if (this.hasPendingSyncWork()) this.scheduleAutoSync();
   }
 
   onunload() {
@@ -1698,20 +1710,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // is stale — drop it rather than pull one vault's files against another.
       if (this.switchingVault || (manifest.vaultId && manifest.vaultId !== this.data.vaultId)) return;
       this.applyStorageFromManifest(manifest);
-      // We've now seen the server's current state — safe to push. (This also
-      // covers the "already up to date" case below where no pull is needed.)
-      this.markPulledSinceOpen();
-      // Upload safety net: if anything is still waiting to upload (a change whose
-      // event landed mid-pull, a failed upload left dirty, a cancelled debounce),
-      // flush it on this poll tick instead of waiting for another local edit.
-      // Include durable deletes/folder deletes too: unlike an edited file, those
-      // can have no live dirty path after a failed removal request.
-      const hasPendingUpload = (this.dirtyUploadPaths && this.dirtyUploadPaths.size)
-        || (this.data.pendingUploads && this.data.pendingUploads.length)
-        || (this.data.pendingDeletes && this.data.pendingDeletes.length)
-        || (this.data.pendingFolderDeletes && this.data.pendingFolderDeletes.length);
-      if (hasPendingUpload) this.scheduleAutoSync();
-      if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) return;
+      // An unchanged manifest needs no content pull and is enough to open the
+      // push gate. If it changed, pullLatest opens the gate ONLY after every
+      // remote file was applied successfully. Opening it before that let a failed
+      // mobile pull fall through into a stale full-vault upload and revert data.
+      if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) {
+        this.markPulledSinceOpen();
+        return;
+      }
       await this.pullLatest({ manifest, silent: true });
     } catch (error) {
       if (isVaultAccessError(error)) {
