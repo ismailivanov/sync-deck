@@ -1679,6 +1679,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // We've now seen the server's current state — safe to push. (This also
       // covers the "already up to date" case below where no pull is needed.)
       this.markPulledSinceOpen();
+      // Upload safety net: if anything is still waiting to upload (a change whose
+      // event landed mid-pull, a failed upload left dirty, a cancelled debounce),
+      // flush it on this poll tick instead of waiting for another local edit.
+      // Keyed on dirty paths only, so an empty steady state schedules nothing.
+      if (this.dirtyUploadPaths && this.dirtyUploadPaths.size) this.scheduleAutoSync();
       if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) return;
       await this.pullLatest({ manifest, silent: true });
     } catch (error) {
@@ -1955,6 +1960,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
         if (action === "delete") addFolderDelete(path);
         else if (action === "rename") { addFolderDelete(oldPath); if (!touched.has(path)) dropFolderDelete(path); }
         else if (!touched.has(path)) dropFolderDelete(path); // user re-created it
+        // Make sure the recorded folder op actually uploads: the timer waits out
+        // the in-flight pull via its own mutual-exclusion reschedule.
+        this.scheduleAutoSync();
         return;
       }
       // Our own pull fires create/modify/delete events. Ignore those (they are in
@@ -1974,6 +1982,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (!this.data.pendingDeletes.includes(gone)) this.data.pendingDeletes.push(gone);
         }
       }
+      // A user change that raced a pull used to be marked dirty but NEVER
+      // scheduled — it sat unuploaded until the next unrelated vault event, so an
+      // edit made during a poll-pull window could miss the whole session. Always
+      // schedule; the timer itself waits out the pull (mutual exclusion) and
+      // re-checks every gate.
+      this.scheduleAutoSync();
       return;
     }
     if (!this.data.syncEnabled) return;
@@ -2023,7 +2037,15 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
   scheduleAutoSync() {
     if (!this.hasAcceptedTerms()) return; // no uploads until the terms are accepted
-    if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
+    // Earliest-deadline, NOT trailing debounce: keep the first pending deadline
+    // instead of pushing the timer back on every event. A burst of writes (e.g.
+    // Task Deck rewriting a whole list on one drag) used to reset the 250ms timer
+    // continuously, so the upload only started after the user went idle — and if
+    // they closed the app right after editing, their changes never reached the
+    // server at all (they only went out on the NEXT open's full re-upload).
+    // Changes must start uploading at most 250ms after the FIRST edit; anything
+    // still being written re-adds itself to dirtyUploadPaths and goes next run.
+    if (this.autoSyncTimer) return;
     this.autoSyncTimer = window.setTimeout(async () => {
       this.autoSyncTimer = null;
       if (this.unloaded) return;
