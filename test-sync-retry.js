@@ -1,4 +1,5 @@
 const assert = require("assert");
+const crypto = require("crypto");
 const Module = require("module");
 
 class Base {}
@@ -45,11 +46,23 @@ async function main() {
 
   plugin.data.pendingUploads = [];
   plugin.dirtyUploadPaths = new Set();
+  plugin.pendingUploadsAtOpen = new Set();
   plugin.pulledSinceOpen = false;
   let scheduled = false;
   plugin.scheduleAutoSync = () => { scheduled = true; };
   plugin.markPulledSinceOpen();
   assert(!scheduled, "opening a clean vault must not trigger a full upload");
+
+  plugin.pulledSinceOpen = false;
+  plugin.dirtyUploadPaths = new Set(["prior-session.md", "task-deck-startup.md"]);
+  plugin.pendingUploadsAtOpen = new Set(["prior-session.md"]);
+  let snapshot = plugin.pullDirtySnapshot();
+  assert.deepStrictEqual(Array.from(snapshot.dirty), ["prior-session.md"]);
+  assert.deepStrictEqual(Array.from(snapshot.startup), ["task-deck-startup.md"]);
+  plugin.pulledSinceOpen = true;
+  snapshot = plugin.pullDirtySnapshot();
+  assert.deepStrictEqual(Array.from(snapshot.dirty), ["prior-session.md", "task-deck-startup.md"]);
+  assert.strictEqual(snapshot.startup.size, 0);
 
   scheduled = false;
   plugin.data.syncEnabled = true;
@@ -96,6 +109,48 @@ async function main() {
   await plugin.pollRemoteChanges();
   assert(pullCalled);
   assert(!scheduled);
+
+  // A same-open Task Deck rewrite is startup churn, not durable prior-session
+  // work: the first pull must replace it with the newer server bytes.
+  const remoteFirst = Object.create(SyncDeckPlugin.prototype);
+  const file = new TFile("Board/card.md", 5);
+  let localBytes = Buffer.from("stale");
+  const oldHash = crypto.createHash("sha256").update(localBytes).digest("hex");
+  const remoteBytes = Buffer.from("newer");
+  const remoteHash = crypto.createHash("sha256").update(remoteBytes).digest("hex");
+  remoteFirst.app = { vault: {
+    getName: () => "Test",
+    getFiles: () => [file],
+    getAbstractFileByPath: (path) => path === file.path ? file : null,
+    createFolder: async () => {},
+    readBinary: async () => localBytes,
+    modifyBinary: async (_file, content) => { localBytes = Buffer.from(content); file.stat.size = localBytes.length; },
+  } };
+  remoteFirst.data = remoteFirst.normalizeData({
+    vaultId: "vault-test",
+    signedIn: true,
+    syncEnabled: true,
+    syncedHashes: { [file.path]: oldHash },
+  });
+  remoteFirst.dirtyUploadPaths = new Set([file.path]);
+  remoteFirst.pendingUploadsAtOpen = new Set();
+  remoteFirst.pulledSinceOpen = false;
+  remoteFirst.registerVault = async () => {};
+  remoteFirst.applyStorageFromManifest = () => {};
+  remoteFirst.scanVault = async () => true;
+  remoteFirst.savePluginData = async () => {};
+  remoteFirst.scheduleAutoSync = () => {};
+  remoteFirst.api = async (path) => {
+    assert(path.includes("/files/content"));
+    return { contentBase64: remoteBytes.toString("base64"), file: { hash: remoteHash } };
+  };
+  await remoteFirst.pullLatest({
+    silent: true,
+    manifest: { vaultId: "vault-test", updatedAt: "new", files: [{ path: file.path, size: remoteBytes.length, hash: remoteHash }] },
+  });
+  assert.strictEqual(localBytes.toString(), "newer");
+  assert(!remoteFirst.dirtyUploadPaths.has(file.path));
+  assert(remoteFirst.pulledSinceOpen);
 
   console.log("sync retry checks passed");
 }

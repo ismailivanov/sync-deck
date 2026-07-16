@@ -1450,6 +1450,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     // intentionally memory-only, but losing the dirty paths meant a half-finished
     // upload had no explicit retry record until the next open's full scan.
     this.dirtyUploadPaths = new Set(this.data.pendingUploads);
+    // Only paths already durable when the plugin loaded are genuine unfinished
+    // work from the prior session. New events before the first pull can be
+    // startup churn from another plugin (notably Task Deck's reconciliation).
+    this.pendingUploadsAtOpen = new Set(this.data.pendingUploads);
 
     addIcon(ICON_ID, ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new SyncDeckView(leaf, this));
@@ -1481,12 +1485,23 @@ module.exports = class SyncDeckPlugin extends Plugin {
       || (this.data.pendingFolderDeletes && this.data.pendingFolderDeletes.length));
   }
 
+  pullDirtySnapshot() {
+    const all = new Set(this.dirtyUploadPaths || []);
+    if (this.pulledSinceOpen) return { dirty: all, startup: new Set() };
+    const durable = this.pendingUploadsAtOpen || new Set();
+    return {
+      dirty: new Set(Array.from(all).filter((path) => durable.has(path))),
+      startup: new Set(Array.from(all).filter((path) => !durable.has(path))),
+    };
+  }
+
   markPulledSinceOpen() {
     if (this.pulledSinceOpen) return;
     // The first successful server check/pull establishes the disk baseline for
     // incremental uploads. Persisted dirty paths still override these signatures.
     this.seedUploadSignaturesFromDisk();
     this.pulledSinceOpen = true;
+    this.pendingUploadsAtOpen = new Set();
     // Never full-upload a vault merely because the app opened. That stale-device
     // upload could revert a newer server copy after a failed first pull.
     if (this.hasPendingSyncWork()) this.scheduleAutoSync();
@@ -1754,6 +1769,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.remoteUpdatedAt = "";
     this.uploadedSignatures = {};
     this.dirtyUploadPaths = new Set();
+    this.pendingUploadsAtOpen = new Set();
     this.pushQueueItem(action, "Vault access", 0, "removed from vault");
     await this.savePluginData();
     const count = syncedPaths.size;
@@ -1992,6 +2008,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.syncedHashes = {};
     this.uploadedSignatures = {};
     this.dirtyUploadPaths = new Set();
+    this.pendingUploadsAtOpen = new Set();
     // A fresh vault association: don't push until we've pulled its current state.
     this.pulledSinceOpen = false;
   }
@@ -2162,6 +2179,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.vaultStats.syncedFiles = 0;
       this.uploadedSignatures = {};
       this.dirtyUploadPaths = new Set();
+      this.pendingUploadsAtOpen = new Set();
       this.pulledSinceOpen = false; // new vault: pull before any push
       await this.savePluginData();
 
@@ -2816,7 +2834,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // Skip pulling/trashing a file that has un-uploaded LOCAL edits (dirty), so
       // we never clobber the user's own unsaved work — but DO sync a file the user
       // is only viewing, so others' edits and deletions show up live.
-      const dirty = this.dirtyUploadPaths || new Set();
+      const { dirty, startup } = this.pullDirtySnapshot();
       // Snapshot the known-set at entry so a concurrent upload cannot make a
       // just-added path look like a remote deletion mid-pull.
       const known = this.getRemoteKnownPaths();
@@ -2835,6 +2853,31 @@ module.exports = class SyncDeckPlugin extends Plugin {
           if (dirty.has(remoteFile.path)) continue;
 
           const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
+          // A Task Deck startup reconcile can rewrite stale local files before
+          // Sync Deck's first poll. Those same-open events must never block the
+          // required remote-first pull. If the bytes are neither the last synced
+          // version nor the incoming server version, preserve them as a conflict
+          // copy before replacing the original, so even a genuine very-early user
+          // edit cannot be lost.
+          if (startup.has(remoteFile.path) && remoteFile.hash && localFile instanceof TFile) {
+            try {
+              const localContent = await this.app.vault.readBinary(localFile);
+              const localHash = await sha256Hex(localContent);
+              const priorHash = this.data.syncedHashes[remoteFile.path];
+              if (localHash && localHash !== remoteFile.hash && (!priorHash || localHash !== priorHash)) {
+                const conflictPath = normalizePath(this.conflictCopyPath(remoteFile.path));
+                await this.ensureParentFolder(conflictPath);
+                this.pullTouchedPaths.add(conflictPath);
+                await this.app.vault.createBinary(conflictPath, localContent);
+                this.data.syncedHashes[conflictPath] = localHash;
+                this.markUploadPending(conflictPath);
+                this.pendingUploadsAtOpen.add(conflictPath);
+                if (!options.silent) new Notice(`Kept an early local edit as "${conflictPath}" before pulling the server version.`);
+              }
+            } catch (error) {
+              // If the file vanished mid-check, the normal pull below recreates it.
+            }
+          }
           // Pull only when the content actually differs, decided by hash (NOT by
           // cross-machine mtime, which clock skew makes unreliable and which was
           // silently skipping real edits). Seed the local hash once so we don't
@@ -2864,7 +2907,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
           // would silently destroy the user's own content, so instead keep the
           // local file and save the incoming version alongside it. Both versions
           // then upload and coexist on every device; the user reconciles them.
-          if (remoteFile.hash && !hadPriorHash && localFile instanceof TFile && knownHash !== undefined) {
+          if (remoteFile.hash && !startup.has(remoteFile.path) && !hadPriorHash && localFile instanceof TFile && knownHash !== undefined) {
             const remoteC = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
             const remoteContent = base64ToArrayBuffer(remoteC.contentBase64);
             const conflictPath = normalizePath(this.conflictCopyPath(remoteFile.path));
@@ -2993,6 +3036,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
 
       this.data.serverStatus = "online";
+      // Startup-generated dirty events have now been superseded by the server
+      // truth. Durable prior-session edits and any conflict copies remain queued.
+      startup.forEach((path) => this.dirtyUploadPaths.delete(path));
+      this.data.pendingUploads = Array.from(this.dirtyUploadPaths || []);
       this.data.remoteUpdatedAt = manifest.updatedAt || this.data.remoteUpdatedAt;
       this.data.lastSync = new Date().toLocaleString();
       this.markPulledSinceOpen(); // a direct pull (switch/join/manual) also confirms server state
@@ -3364,6 +3411,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.syncedHashes = {};
       this.uploadedSignatures = {};
       this.dirtyUploadPaths = new Set();
+      this.pendingUploadsAtOpen = new Set();
       // Keep sync OFF during the initial two-way pass. The background poll loop
       // only runs when syncEnabled, so this guarantees it cannot race and
       // interleave an upload into our pull. We enable continuous sync only after
