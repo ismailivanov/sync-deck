@@ -48,6 +48,7 @@ const DEFAULT_DATA = {
   termsAcceptedVersion: "",
   storageBlocked: false,
   storageBlockedReason: "",
+  pendingUploads: [],
   vaultStats: {
     totalFiles: 0,
     syncableFiles: 0,

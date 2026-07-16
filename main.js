@@ -51,6 +51,7 @@ const DEFAULT_DATA = {
   termsAcceptedVersion: "",
   storageBlocked: false,
   storageBlockedReason: "",
+  pendingUploads: [],
   vaultStats: {
     totalFiles: 0,
     syncableFiles: 0,
@@ -1445,6 +1446,10 @@ class VaultInspectModal extends Modal {
 module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
+    // Upload intent must survive an app/plugin shutdown. The mtime:size cache is
+    // intentionally memory-only, but losing the dirty paths meant a half-finished
+    // upload had no explicit retry record until the next open's full scan.
+    this.dirtyUploadPaths = new Set(this.data.pendingUploads);
 
     addIcon(ICON_ID, ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new SyncDeckView(leaf, this));
@@ -1552,6 +1557,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.remoteKnownPaths = Array.isArray(data.remoteKnownPaths) ? data.remoteKnownPaths : [];
     data.remoteKnownVaultId = typeof data.remoteKnownVaultId === "string" ? data.remoteKnownVaultId : "";
     data.pendingDeletes = Array.isArray(data.pendingDeletes) ? data.pendingDeletes : [];
+    data.pendingUploads = Array.from(new Set(
+      (Array.isArray(data.pendingUploads) ? data.pendingUploads : [])
+        .filter((path) => typeof path === "string" && path && !isIgnoredPath(path))
+    ));
     // Folder sync (empty folders included). remoteKnownFolders carries its OWN
     // vault tag (NOT the file tag) so setRemoteKnownPaths re-tagging the file
     // baseline can never make a stale cross-vault folder baseline look current.
@@ -1725,6 +1734,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.remoteKnownPaths = [];
     this.data.remoteKnownVaultId = "";
     this.data.pendingDeletes = [];
+    this.data.pendingUploads = [];
     this.data.remoteKnownFolders = [];
     this.data.remoteKnownFoldersVaultId = "";
     this.data.pendingFolderDeletes = [];
@@ -1962,6 +1972,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.remoteKnownPaths = [];
     this.data.remoteKnownVaultId = "";
     this.data.pendingDeletes = [];
+    this.data.pendingUploads = [];
     this.data.remoteKnownFolders = [];
     this.data.remoteKnownFoldersVaultId = "";
     this.data.pendingFolderDeletes = [];
@@ -2130,6 +2141,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.remoteKnownPaths = [];
       this.data.remoteKnownVaultId = "";
       this.data.pendingDeletes = [];
+      this.data.pendingUploads = [];
       this.data.remoteKnownFolders = [];
       this.data.remoteKnownFoldersVaultId = "";
       this.data.pendingFolderDeletes = [];
@@ -2279,6 +2291,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
       return item && item.path;
     }).slice(0, 20);
+  }
+
+  markUploadPending(path) {
+    if (!path || isIgnoredPath(path)) return;
+    this.dirtyUploadPaths = this.dirtyUploadPaths || new Set();
+    this.dirtyUploadPaths.add(path);
+    this.data.pendingUploads = Array.from(new Set([...(this.data.pendingUploads || []), path]));
   }
 
   registerVaultEvents() {
@@ -2598,6 +2617,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     // snapshot was already cleared at entry; a file re-edited mid-run has re-added
     // itself and correctly survives.
     if (this.dirtyUploadPaths) failed.forEach((path) => this.dirtyUploadPaths.add(path));
+    // Clear durable intent only after the upload attempt has finished. A path
+    // re-edited while its first upload was in flight is back in the live set and
+    // therefore remains durable for the following run.
+    this.data.pendingUploads = Array.from(this.dirtyUploadPaths || []);
     if (failed.size) this.pushQueueItem("upload", `${failed.size} file(s) will retry`, 0, "retry");
 
     // Explicitly delete only the files THIS device intentionally removed: paths
@@ -2741,8 +2764,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // Upload safety net: if anything is still waiting to upload (a change whose
       // event landed mid-pull, a failed upload left dirty, a cancelled debounce),
       // flush it on this poll tick instead of waiting for another local edit.
-      // Keyed on dirty paths only, so an empty steady state schedules nothing.
-      if (this.dirtyUploadPaths && this.dirtyUploadPaths.size) this.scheduleAutoSync();
+      // Include durable deletes/folder deletes too: unlike an edited file, those
+      // can have no live dirty path after a failed removal request.
+      const hasPendingUpload = (this.dirtyUploadPaths && this.dirtyUploadPaths.size)
+        || (this.data.pendingUploads && this.data.pendingUploads.length)
+        || (this.data.pendingDeletes && this.data.pendingDeletes.length)
+        || (this.data.pendingFolderDeletes && this.data.pendingFolderDeletes.length);
+      if (hasPendingUpload) this.scheduleAutoSync();
       if (!manifest.updatedAt || manifest.updatedAt === this.data.remoteUpdatedAt) return;
       await this.pullLatest({ manifest, silent: true });
     } catch (error) {
@@ -3013,6 +3041,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (file instanceof TFolder) {
         if ((path && path.startsWith(".")) || (oldPath && oldPath.startsWith("."))) return;
         const touched = this.pullTouchedPaths || new Set();
+        const userChanged = (action === "delete" ? path : action === "rename" ? oldPath : path)
+          && !(action === "rename" ? touched.has(oldPath) && touched.has(path) : touched.has(path));
         this.data.pendingFolderDeletes = Array.isArray(this.data.pendingFolderDeletes) ? this.data.pendingFolderDeletes : [];
         const addFolderDelete = (p) => { if (p && !touched.has(p) && !this.data.pendingFolderDeletes.includes(p)) this.data.pendingFolderDeletes.push(p); };
         const dropFolderDelete = (p) => { this.data.pendingFolderDeletes = this.data.pendingFolderDeletes.filter((x) => x !== p); };
@@ -3021,17 +3051,21 @@ module.exports = class SyncDeckPlugin extends Plugin {
         else if (!touched.has(path)) dropFolderDelete(path); // user re-created it
         // Make sure the recorded folder op actually uploads: the timer waits out
         // the in-flight pull via its own mutual-exclusion reschedule.
-        this.scheduleAutoSync();
+        if (userChanged) {
+          this.scheduleAutoSync();
+          await this.savePluginData();
+        }
         return;
       }
       // Our own pull fires create/modify/delete events. Ignore those (they are in
       // pullTouchedPaths), but still handle genuine USER changes racing the pull:
       const survivor = action !== "delete" && file && file.path ? file.path : null;
+      let userChanged = false;
       // Protect a path the user created/renamed-INTO during the pull from the
       // trash loop, which would otherwise destroy that fresh content.
       if (survivor && !isIgnoredPath(survivor) && !(this.pullTouchedPaths && this.pullTouchedPaths.has(survivor))) {
-        this.dirtyUploadPaths = this.dirtyUploadPaths || new Set();
-        this.dirtyUploadPaths.add(survivor);
+        this.markUploadPending(survivor);
+        userChanged = true;
       }
       // Capture a user delete/rename so the removal is not silently swallowed.
       if (action === "delete" || action === "rename") {
@@ -3039,6 +3073,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
         if (gone && !isIgnoredPath(gone) && !(this.pullTouchedPaths && this.pullTouchedPaths.has(gone))) {
           this.data.pendingDeletes = Array.isArray(this.data.pendingDeletes) ? this.data.pendingDeletes : [];
           if (!this.data.pendingDeletes.includes(gone)) this.data.pendingDeletes.push(gone);
+          userChanged = true;
         }
       }
       // A user change that raced a pull used to be marked dirty but NEVER
@@ -3046,7 +3081,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // edit made during a poll-pull window could miss the whole session. Always
       // schedule; the timer itself waits out the pull (mutual exclusion) and
       // re-checks every gate.
-      this.scheduleAutoSync();
+      if (userChanged) {
+        this.scheduleAutoSync();
+        await this.savePluginData();
+      }
       return;
     }
     if (!this.data.syncEnabled) return;
@@ -3063,15 +3101,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (action === "delete") addFolderDelete(path);
       else if (action === "rename") { if (oldPath) addFolderDelete(oldPath); dropFolderDelete(path); }
       else dropFolderDelete(path); // create => the folder exists; cancel any delete intent
-      await this.savePluginData();
       this.scheduleAutoSync();
+      await this.savePluginData();
       return;
     }
 
     // A locally-originated change is always uploaded on the next sync, even if
     // its mtime/size signature happens to match the cache (incremental guard).
-    this.dirtyUploadPaths = this.dirtyUploadPaths || new Set();
-    this.dirtyUploadPaths.add(path);
+    this.markUploadPending(path);
 
     // Record intentional local removals durably in this.data (survives reload)
     // so a genuine deletion still propagates after a restart, while a create/modify
@@ -3090,8 +3127,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
     } else {
       this.pushQueueItem(action, path, size, "pending", oldPath);
     }
-    await this.savePluginData();
+    // Arm the upload before waiting for data.json. Slow storage or a close right
+    // after a drag must not postpone the network attempt behind plugin-state I/O.
     this.scheduleAutoSync();
+    await this.savePluginData();
   }
 
   scheduleAutoSync() {
@@ -3311,6 +3350,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.remoteKnownPaths = [];
       this.data.remoteKnownVaultId = "";
       this.data.pendingDeletes = [];
+      this.data.pendingUploads = [];
       this.data.remoteKnownFolders = [];
       this.data.remoteKnownFoldersVaultId = "";
       this.data.pendingFolderDeletes = [];
