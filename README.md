@@ -5,19 +5,35 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-f1c40f.svg)](LICENSE)
 [![Support](https://img.shields.io/badge/support-Buy%20Me%20a%20Coffee-ffdd00.svg)](https://buymeacoffee.com/carbon06)
 
-Sync Deck keeps your Obsidian vault in sync across your devices — and, when you want, with your team. Sign in with Google, choose what to sync, and your notes stay up to date everywhere, with live presence while you collaborate.
+Sync Deck keeps an Obsidian vault in sync across your devices and, when you choose, with your team. Sign in with Google, open or create a synced vault, and Sync Deck handles background file sync, recoverable deletes, invites, roles, and live presence.
 
-It's the cloud companion to [**Task Deck**](https://github.com/ismailivanov/task-deck): because Task Deck's boards are plain Markdown notes, Sync Deck keeps them in sync and shows who's on which card.
+It is also the cloud companion to [**Task Deck**](https://github.com/ismailivanov/task-deck): Task Deck boards are Markdown files, so Sync Deck can carry them across devices and add collaboration without a separate board database.
+
+![Sync Deck vault dashboard with storage, vault switching, and team members](docs/images/sync-deck-dashboard.png)
+
+<sub>The dashboard uses demo names, addresses, and vault data.</sub>
 
 ## Features
 
-- **Google sign-in** — nothing new to set up.
-- **Vault sync** — files and folders (empty folders included), with automatic background sync as you edit, and one-tap pull.
-- **A vault system, not a black box** — keep several synced vaults, open one at a time, and inspect, rename, switch, or close any of them. Vaults never mix.
-- **You choose what goes in** — nothing syncs until you say so. When you create a vault, decide whether to bring your existing files along or start clean.
-- **Teams** — share a vault with an invite code, with Admin and Worker roles, and see live presence while editing together.
-- **Your files stay yours** — leaving a vault drops the shared files (to Obsidian trash, recoverable) and hands you back your own local notes. Deletes are recoverable, never silent.
-- **Live storage view** — see exactly what you're using against your plan.
+- **Google sign-in** with no additional Sync Deck password.
+- **Automatic vault sync** for files and folders, plus manual **Sync now** and **Pull** controls.
+- **Multiple synced vaults** that can be inspected, opened, renamed, switched, closed, or deleted without mixing their contents.
+- **Explicit first sync**: nothing is uploaded until you create or open a vault and choose whether to include the files already on the device.
+- **Shared vaults** with invite codes, Admin and Worker roles, a visible member list, and live editor presence.
+- **Recoverable file handling**: files removed during a vault switch or leave flow go through Obsidian's trash.
+- **Storage visibility** with current usage, per-file limits, sync state, and recent activity in one panel.
+- **Task Deck integration** for synced boards, card assignments, and collaborative presence.
+
+## Quick start
+
+1. Install and enable Sync Deck.
+2. Open it from the Obsidian ribbon.
+3. Read and accept the Terms & Privacy Notice.
+4. Continue with Google.
+5. Create a synced vault, open an existing one, or join with an invite code.
+6. Choose whether the first sync should include the files already in this Obsidian vault.
+
+After setup, local edits are queued in the background. Use **Sync now** for an immediate scan, **Pull** to check the remote vault, or **Pause** when you want to stop syncing temporarily.
 
 ## Plans
 
@@ -28,7 +44,9 @@ It's the cloud companion to [**Task Deck**](https://github.com/ismailivanov/task
 | Synced [Task Deck](https://github.com/ismailivanov/task-deck) boards | 1 | Unlimited |
 | Real-time sync, presence, invites, roles | ✓ | ✓ |
 
-Pro is **$4 / month** or **$39 / year**. Upgrade any time from the Sync Deck panel — cancel whenever.
+Pro checkout is **$4 / month**. A **$39 / year** option is shown in the plugin when yearly billing is available. The in-app upgrade panel is the source of truth for currently available billing intervals.
+
+![Sync Deck Free and Pro comparison](docs/images/sync-deck-plans.png)
 
 ## Account, network use & privacy
 
@@ -45,11 +63,11 @@ Sync Deck is a hosted cloud service, so a few things to know up front:
 
 ## Install
 
-Until Sync Deck lands in the community plugins list, install it manually:
+Until Sync Deck is available in the Obsidian community plugin directory:
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/ismailivanov/sync-deck/releases).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/ismailivanov/sync-deck/releases/latest).
 2. Put them in your vault under `.obsidian/plugins/sync-deck/`.
-3. Enable **Sync Deck** in Obsidian's *Community plugins* settings.
+3. Enable **Sync Deck** in Obsidian under **Settings → Community plugins**.
 
 Or clone straight into your plugins folder for the latest source:
 
@@ -59,11 +77,13 @@ git clone https://github.com/ismailivanov/sync-deck.git "/path/to/vault/.obsidia
 
 ## How it works
 
-Open Sync Deck from the ribbon and sign in with Google. Nothing syncs on its own — you create or open a vault first, and choose whether to include your existing notes. From then on, changes sync in the background over HTTPS to the hosted API at `https://api.syncdeck.cloud`. Your files are stored per account; you can switch between vaults, share them, or leave them at any time.
+Sync Deck scans the active Obsidian vault, compares local and remote file state, and transfers changes over HTTPS through `https://api.syncdeck.cloud`. Each synced vault has its own identity, files, membership, and activity. Only one is open in a local Obsidian vault at a time.
+
+When you switch synced vaults, Sync Deck moves the previous vault's synced files to Obsidian trash before opening the next one. This prevents two remote vaults from being merged accidentally and keeps the removed files recoverable.
 
 ## Works with Task Deck
 
-[**Task Deck**](https://github.com/ismailivanov/task-deck) is a Trello-style kanban board for Obsidian where every card is a real Markdown note. Since those notes live in your vault, Sync Deck carries your boards across devices and adds live presence — you'll see who's editing which card in real time. Install both for a synced, collaborative task board. There's a **Sync your boards & vaults** button inside Task Deck that opens Sync Deck.
+[**Task Deck**](https://github.com/ismailivanov/task-deck) is a kanban and table workflow for Obsidian where each card is a Markdown note. Install both plugins to sync board structure, cards, and attachments, assign shared-vault members to cards, and see live presence while teammates work.
 
 ## Support
 
