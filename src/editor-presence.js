@@ -167,10 +167,13 @@ class EditorPresence {
     const color = (this.plugin.data.user && this.plugin.data.user.color) || "#8b5cf6";
     this.inFlight = true;
     try {
+      const encrypted = this.plugin.activeEncryptionVersion && this.plugin.activeEncryptionVersion() === 1;
+      const presencePath = encrypted ? await this.plugin.blindPresenceId("file-presence", path) : path;
       const result = await this.plugin.api(`/vaults/${encodeURIComponent(this.plugin.data.vaultId)}/files/presence`, {
         method: "POST",
         body: {
-          path, color, editing: cur.editing,
+          ...(encrypted ? { fileId: presencePath } : { path: presencePath }),
+          color, editing: cur.editing,
           line: cur.line, ch: cur.ch,
           fromLine: cur.fromLine, fromCh: cur.fromCh, toLine: cur.toLine, toCh: cur.toCh,
         },
@@ -186,9 +189,11 @@ class EditorPresence {
 
   async sendLeave(path) {
     try {
+      const encrypted = this.plugin.activeEncryptionVersion && this.plugin.activeEncryptionVersion() === 1;
+      const presencePath = encrypted ? await this.plugin.blindPresenceId("file-presence", path) : path;
       await this.plugin.api(`/vaults/${encodeURIComponent(this.plugin.data.vaultId)}/files/presence`, {
         method: "POST",
-        body: { path, leave: true },
+        body: { ...(encrypted ? { fileId: presencePath } : { path: presencePath }), leave: true },
       });
     } catch (error) {
       // best-effort; the server TTL expires us anyway

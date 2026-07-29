@@ -1,6 +1,6 @@
 # Sync Deck — Terms of Service & Privacy Notice
 
-**Last updated: 6 July 2026**
+**Last updated: 29 July 2026**
 
 Welcome to Sync Deck. By installing, enabling, or using the Sync Deck plugin and
 the Sync Deck hosted service (together, **"Sync Deck"** or **"the Service"**), you
@@ -56,8 +56,9 @@ any privacy matter directly with the operator at the contact address below.
 
 - **Account information** from Google sign-in: your email address, name, and
   profile picture.
-- **The content you choose to sync**: your files, folders, and related metadata,
-  stored on our server.
+- **The encrypted form of content you choose to sync**: ciphertext for your files,
+  filenames, folder paths, and protected file metadata. Legacy vaults that you
+  have not yet upgraded are stored without end-to-end encryption.
 - **Technical and usage data** needed to run and protect the Service: a device
   identifier, timestamps, and your IP address (used for rate-limiting and abuse
   prevention).
@@ -93,9 +94,10 @@ from our servers. Some limited records may be retained where required by law
 
 ### Security
 
-We use encrypted connections (HTTPS) and reasonable technical measures to protect
-your data. However, **no method of transmission or storage is 100% secure**, and
-Sync Deck does not use end-to-end encryption (see *No end-to-end encryption*).
+We use end-to-end encryption for new and upgraded vault data, encrypted
+connections (HTTPS), and reasonable technical measures to protect your data.
+However, **no method of transmission, storage, or endpoint protection is 100%
+secure**. See *End-to-end encryption and its limits*.
 
 ### Your privacy choices and rights
 
@@ -167,14 +169,37 @@ in the legal section below for how this interacts with our general refund policy
 
 *(These are the parts that limit what you can expect from us. They matter.)*
 
-### No end-to-end encryption
+### End-to-end encryption and its limits
 
-Sync Deck does **not** currently use end-to-end encryption. Your files are sent
-over an encrypted connection but are **stored on our server in a form the operator
-can technically access.** **Do not use Sync Deck to store or sync passwords,
-secrets, other people's personal data, health or financial records, or anything
-you're legally or contractually required to keep confidential.** You alone decide
-what to sync and are responsible for that choice.
+New vaults, and older vaults after the owner completes the in-app upgrade, encrypt
+file contents, filenames, folder paths, protected file metadata, and synced Task
+Deck board/card identifiers on a member's device before upload. The server stores
+encrypted blobs and opaque identifiers and does not receive the vault's
+cryptographic key. Encryption uses standard authenticated cryptography; the
+technical design and threat model are documented in
+[docs/E2EE.md](docs/E2EE.md).
+
+End-to-end encryption does **not** hide all service metadata. We can still process
+your account identity, vault display name, membership and roles, billing status,
+IP address, device identifier, file counts, encrypted sizes, server timestamps,
+and presence identity, timing, and cursor coordinates. People you invite can
+decrypt the shared vault. A compromised device, malicious plugin, copied recovery
+key, or person who already downloaded a file can also expose content. Removing a
+member prevents future server access but cannot erase copies or keys they already
+obtained. The owner can rotate the vault key for future sync; this creates a
+verified replacement vault and requires intended members to be invited again.
+
+The vault key is held on authorized devices. The `SDK1` recovery key is the user's
+responsibility, and an `SD1` invite includes key material plus a short-lived,
+single-use membership code and must be shared privately. We cannot reset or
+recover a lost vault key and cannot decrypt the vault if all authorized members
+lose it.
+
+Vaults created before this feature remain visibly marked **Legacy** until their
+owner enables E2EE. During migration, Sync Deck first creates and verifies an
+encrypted replacement, then deletes the old server-side plaintext copy. Existing
+members must be invited again. Until that migration finishes, the legacy vault is
+not end-to-end encrypted.
 
 ### The Service is provided "as is"
 

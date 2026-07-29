@@ -223,6 +223,22 @@
 }
 .sd-plan-badge.is-free { background: var(--background-modifier-border); color: var(--text-muted); }
 .sd-plan-badge.is-pro { background: color-mix(in srgb, var(--interactive-accent) 22%, transparent); color: var(--interactive-accent); }
+.sd-encryption-badge {
+  flex: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+.sd-encryption-badge.is-encrypted {
+  background: color-mix(in srgb, #22c55e 16%, transparent);
+  color: #16a34a;
+}
+.sd-encryption-badge.is-legacy {
+  background: color-mix(in srgb, #f59e0b 16%, transparent);
+  color: #d97706;
+}
 
 /* Storage */
 .sd-storage { display: flex; flex-direction: column; gap: 6px; }
@@ -276,6 +292,27 @@
 .sd-sync-time { color: var(--text-muted); font-weight: 600; }
 
 .sd-vc-actions { display: flex; gap: 8px; }
+.sd-security-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-radius: 9px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.sd-security-row.is-encrypted {
+  background: color-mix(in srgb, #22c55e 9%, transparent);
+  color: var(--text-muted);
+}
+.sd-security-row.is-legacy {
+  background: color-mix(in srgb, #f59e0b 9%, transparent);
+  color: var(--text-muted);
+}
+.sd-security-row .sd-text-button { flex: none; font-size: 11px; }
 
 .sd-upgrade-btn {
   background: color-mix(in srgb, var(--interactive-accent) 16%, transparent);

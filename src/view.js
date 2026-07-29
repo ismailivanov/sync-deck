@@ -185,6 +185,12 @@ class SyncDeckView extends ItemView {
     nameWrap.append(createElement("strong", "", data.workspace || "My vault"));
     const isPro = data.plan === "pro";
     nameWrap.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
+    const encrypted = Number(data.vaultEncryptionVersions && data.vaultEncryptionVersions[data.vaultId]) === 1;
+    nameWrap.append(createElement(
+      "span",
+      `sd-encryption-badge is-${encrypted ? "encrypted" : "legacy"}`,
+      encrypted ? "E2EE" : "Legacy"
+    ));
     head.append(nameWrap);
     const headActions = createElement("div", "sd-vc-head-actions");
     headActions.append(textButton("eye", "", () => this.plugin.inspectVault({ vaultId: data.vaultId, workspace: data.workspace }), "sd-icon-btn"));
@@ -228,6 +234,30 @@ class SyncDeckView extends ItemView {
       actions.append(textButton("cloud-download", "Pull", () => this.plugin.pullLatest()));
     }
     card.append(actions);
+
+    const security = createElement("div", `sd-security-row is-${encrypted ? "encrypted" : "legacy"}`);
+    const pendingCleanup = data.pendingEncryptionCleanup
+      && data.pendingEncryptionCleanup.newVaultId === data.vaultId;
+    security.append(createElement(
+      "span",
+      "",
+      pendingCleanup
+        ? "Encryption migration needs to finish before normal sync resumes."
+        : encrypted
+        ? "Files, filenames, and folder paths are encrypted on this device."
+        : "This older vault is not end-to-end encrypted."
+    ));
+    if (pendingCleanup) {
+      security.append(textButton("shield-check", "Finish migration", () => this.plugin.finishEncryptionCleanup(), "sd-primary-btn"));
+    } else if (encrypted) {
+      security.append(textButton("key-round", "Recovery key", () => this.plugin.copyRecoveryKey(), "sd-ghost-btn"));
+      if (ownsActive) {
+        security.append(textButton("refresh-cw", "Rotate key", () => this.plugin.enableEndToEndEncryption(), "sd-ghost-btn"));
+      }
+    } else if (ownsActive) {
+      security.append(textButton("shield-check", "Enable E2EE", () => this.plugin.enableEndToEndEncryption(), "sd-ghost-btn"));
+    }
+    card.append(security);
 
     if (!isPro && data.billingEnabled) {
       card.append(textButton("sparkles", "Upgrade to Pro", () => this.plugin.openUpgradeModal(), "sd-upgrade-btn sd-block-btn"));
