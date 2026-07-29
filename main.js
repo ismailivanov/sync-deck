@@ -23,6 +23,10 @@ const DEFAULT_DATA = {
   signedIn: false,
   deviceId: "",
   vaultId: "",
+  vaultKeys: {},
+  vaultEncryptionVersions: {},
+  vaultKeyChecks: {},
+  pendingEncryptionCleanup: null,
   serverUrl: "https://api.syncdeck.cloud",
   authToken: "",
   serverStatus: "offline",
@@ -351,6 +355,12 @@ class SyncDeckView extends ItemView {
     nameWrap.append(createElement("strong", "", data.workspace || "My vault"));
     const isPro = data.plan === "pro";
     nameWrap.append(createElement("span", `sd-plan-badge is-${isPro ? "pro" : "free"}`, isPro ? "Pro" : "Free"));
+    const encrypted = Number(data.vaultEncryptionVersions && data.vaultEncryptionVersions[data.vaultId]) === 1;
+    nameWrap.append(createElement(
+      "span",
+      `sd-encryption-badge is-${encrypted ? "encrypted" : "legacy"}`,
+      encrypted ? "E2EE" : "Legacy"
+    ));
     head.append(nameWrap);
     const headActions = createElement("div", "sd-vc-head-actions");
     headActions.append(textButton("eye", "", () => this.plugin.inspectVault({ vaultId: data.vaultId, workspace: data.workspace }), "sd-icon-btn"));
@@ -394,6 +404,30 @@ class SyncDeckView extends ItemView {
       actions.append(textButton("cloud-download", "Pull", () => this.plugin.pullLatest()));
     }
     card.append(actions);
+
+    const security = createElement("div", `sd-security-row is-${encrypted ? "encrypted" : "legacy"}`);
+    const pendingCleanup = data.pendingEncryptionCleanup
+      && data.pendingEncryptionCleanup.newVaultId === data.vaultId;
+    security.append(createElement(
+      "span",
+      "",
+      pendingCleanup
+        ? "Encryption migration needs to finish before normal sync resumes."
+        : encrypted
+        ? "Files, filenames, and folder paths are encrypted on this device."
+        : "This older vault is not end-to-end encrypted."
+    ));
+    if (pendingCleanup) {
+      security.append(textButton("shield-check", "Finish migration", () => this.plugin.finishEncryptionCleanup(), "sd-primary-btn"));
+    } else if (encrypted) {
+      security.append(textButton("key-round", "Recovery key", () => this.plugin.copyRecoveryKey(), "sd-ghost-btn"));
+      if (ownsActive) {
+        security.append(textButton("refresh-cw", "Rotate key", () => this.plugin.enableEndToEndEncryption(), "sd-ghost-btn"));
+      }
+    } else if (ownsActive) {
+      security.append(textButton("shield-check", "Enable E2EE", () => this.plugin.enableEndToEndEncryption(), "sd-ghost-btn"));
+    }
+    card.append(security);
 
     if (!isPro && data.billingEnabled) {
       card.append(textButton("sparkles", "Upgrade to Pro", () => this.plugin.openUpgradeModal(), "sd-upgrade-btn sd-block-btn"));
@@ -843,10 +877,13 @@ class EditorPresence {
     const color = (this.plugin.data.user && this.plugin.data.user.color) || "#8b5cf6";
     this.inFlight = true;
     try {
+      const encrypted = this.plugin.activeEncryptionVersion && this.plugin.activeEncryptionVersion() === 1;
+      const presencePath = encrypted ? await this.plugin.blindPresenceId("file-presence", path) : path;
       const result = await this.plugin.api(`/vaults/${encodeURIComponent(this.plugin.data.vaultId)}/files/presence`, {
         method: "POST",
         body: {
-          path, color, editing: cur.editing,
+          ...(encrypted ? { fileId: presencePath } : { path: presencePath }),
+          color, editing: cur.editing,
           line: cur.line, ch: cur.ch,
           fromLine: cur.fromLine, fromCh: cur.fromCh, toLine: cur.toLine, toCh: cur.toCh,
         },
@@ -862,9 +899,11 @@ class EditorPresence {
 
   async sendLeave(path) {
     try {
+      const encrypted = this.plugin.activeEncryptionVersion && this.plugin.activeEncryptionVersion() === 1;
+      const presencePath = encrypted ? await this.plugin.blindPresenceId("file-presence", path) : path;
       await this.plugin.api(`/vaults/${encodeURIComponent(this.plugin.data.vaultId)}/files/presence`, {
         method: "POST",
-        body: { path, leave: true },
+        body: { ...(encrypted ? { fileId: presencePath } : { path: presencePath }), leave: true },
       });
     } catch (error) {
       // best-effort; the server TTL expires us anyway
@@ -1057,6 +1096,324 @@ class EditorPresence {
 module.exports = { EditorPresence };
 
   },
+  "src/crypto.js": function(module, exports, __require) {
+const PROTOCOL_VERSION = 1;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function webCrypto() {
+  const value = globalThis.crypto;
+  if (!value || !value.subtle || !value.getRandomValues) {
+    throw new Error("This device does not provide the Web Crypto API required for end-to-end encryption.");
+  }
+  return value;
+}
+
+function bytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  throw new Error("Expected binary data.");
+}
+
+function bytesToBase64(value) {
+  const input = bytes(value);
+  if (typeof Buffer !== "undefined") return Buffer.from(input).toString("base64");
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < input.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, input.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  if (typeof value !== "string") throw new Error("Invalid encoded data.");
+  if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(value, "base64"));
+  const binary = atob(value);
+  const output = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) output[i] = binary.charCodeAt(i);
+  return output;
+}
+
+function bytesToBase64Url(value) {
+  return bytesToBase64(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  return base64ToBytes(normalized + "=".repeat((4 - (normalized.length % 4)) % 4));
+}
+
+function bytesToBase32(value) {
+  const input = bytes(value);
+  let bits = 0;
+  let accumulator = 0;
+  let output = "";
+  for (const byte of input) {
+    accumulator = (accumulator << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += BASE32_ALPHABET[(accumulator >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += BASE32_ALPHABET[(accumulator << (5 - bits)) & 31];
+  return output;
+}
+
+function base32ToBytes(value) {
+  const input = String(value || "").toUpperCase().replace(/[\s-]/g, "");
+  let bits = 0;
+  let accumulator = 0;
+  const output = [];
+  for (const char of input) {
+    const index = BASE32_ALPHABET.indexOf(char);
+    if (index < 0) throw new Error("Invalid recovery key.");
+    accumulator = (accumulator << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      output.push((accumulator >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  if (bits > 0 && (accumulator & ((1 << bits) - 1)) !== 0) throw new Error("Invalid recovery key.");
+  return new Uint8Array(output);
+}
+
+function randomBytes(length) {
+  return webCrypto().getRandomValues(new Uint8Array(length));
+}
+
+function validateVaultPath(value) {
+  const path = String(value || "");
+  const parts = path.split("/");
+  if (!path || path.length > 1000 || path.startsWith("/") || path.endsWith("/")
+    || path.includes("\\") || /[\0-\x1f]/.test(path)
+    || parts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Encrypted metadata contains an unsafe vault path.");
+  }
+  return path;
+}
+
+function generateVaultKey() {
+  return bytesToBase64Url(randomBytes(32));
+}
+
+function recoveryCode(key) {
+  const raw = base64UrlToBytes(key);
+  if (raw.length !== 32) throw new Error("Invalid vault key.");
+  return `SDK1-${bytesToBase32(raw)}`;
+}
+
+function parseRecoveryCode(value) {
+  const compact = String(value || "").trim().toUpperCase().replace(/\s/g, "");
+  const payload = compact.startsWith("SDK1-") ? compact.slice(5) : compact;
+  const raw = base32ToBytes(payload);
+  if (raw.length !== 32) throw new Error("Recovery key must contain 256 bits.");
+  return bytesToBase64Url(raw);
+}
+
+function secureInviteCode(serverCode, key) {
+  const code = String(serverCode || "").trim().toUpperCase();
+  if (!/^[A-F0-9]{12}$/.test(code)) throw new Error("Invalid server invite code.");
+  return `SD1-${code}-${bytesToBase32(base64UrlToBytes(key))}`;
+}
+
+function parseSecureInviteCode(value) {
+  const input = String(value || "").trim().toUpperCase().replace(/\s/g, "");
+  const match = input.match(/^SD1-([A-F0-9]{12})-([A-Z2-7]{52})$/);
+  if (!match) throw new Error("This is not a valid encrypted Sync Deck invite.");
+  const keyBytes = base32ToBytes(match[2]);
+  if (keyBytes.length !== 32) throw new Error("The invite contains an invalid vault key.");
+  return { serverCode: match[1], key: bytesToBase64Url(keyBytes) };
+}
+
+async function deriveBytes(masterKey, vaultId, label) {
+  const subtle = webCrypto().subtle;
+  const material = await subtle.importKey("raw", masterKey, "HKDF", false, ["deriveBits"]);
+  return new Uint8Array(await subtle.deriveBits({
+    name: "HKDF",
+    hash: "SHA-256",
+    salt: textEncoder.encode(`syncdeck:e2ee:v1:${vaultId}`),
+    info: textEncoder.encode(`syncdeck:${label}`),
+  }, material, 256));
+}
+
+async function importAesKey(raw) {
+  return webCrypto().subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+async function importHmacKey(raw) {
+  return webCrypto().subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+}
+
+function aad(vaultId, id, purpose) {
+  return textEncoder.encode(`syncdeck:e2ee:v1:${vaultId}:${id}:${purpose}`);
+}
+
+async function encryptJson(key, value, additionalData) {
+  const nonce = randomBytes(12);
+  const plaintext = textEncoder.encode(JSON.stringify(value));
+  const ciphertext = await webCrypto().subtle.encrypt(
+    { name: "AES-GCM", iv: nonce, additionalData, tagLength: 128 },
+    key,
+    plaintext
+  );
+  return { nonce: bytesToBase64Url(nonce), cipher: bytesToBase64Url(ciphertext) };
+}
+
+async function decryptJson(key, nonce, cipher, additionalData) {
+  const plaintext = await webCrypto().subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: base64UrlToBytes(nonce),
+      additionalData,
+      tagLength: 128,
+    },
+    key,
+    base64UrlToBytes(cipher)
+  );
+  return JSON.parse(textDecoder.decode(plaintext));
+}
+
+class VaultCrypto {
+  static async create(vaultId, encodedKey) {
+    const masterKey = base64UrlToBytes(encodedKey);
+    if (masterKey.length !== 32) throw new Error("Vault key must be 256 bits.");
+    const [contentRaw, metadataRaw, indexRaw] = await Promise.all([
+      deriveBytes(masterKey, vaultId, "content"),
+      deriveBytes(masterKey, vaultId, "metadata"),
+      deriveBytes(masterKey, vaultId, "index"),
+    ]);
+    return new VaultCrypto(
+      String(vaultId),
+      encodedKey,
+      await importAesKey(contentRaw),
+      await importAesKey(metadataRaw),
+      await importHmacKey(indexRaw)
+    );
+  }
+
+  constructor(vaultId, encodedKey, contentKey, metadataKey, indexKey) {
+    this.vaultId = vaultId;
+    this.encodedKey = encodedKey;
+    this.contentKey = contentKey;
+    this.metadataKey = metadataKey;
+    this.indexKey = indexKey;
+  }
+
+  async blindId(kind, value) {
+    const signed = await webCrypto().subtle.sign(
+      "HMAC",
+      this.indexKey,
+      textEncoder.encode(`${kind}:${String(value)}`)
+    );
+    return bytesToBase64Url(signed);
+  }
+
+  async keyCheck() {
+    return this.blindId("key-check", this.vaultId);
+  }
+
+  async encryptFile(path, content, metadata = {}) {
+    path = validateVaultPath(path);
+    const id = await this.blindId("file", path);
+    const contentNonce = randomBytes(12);
+    const cipherBuffer = await webCrypto().subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: contentNonce,
+        additionalData: aad(this.vaultId, id, "content"),
+        tagLength: 128,
+      },
+      this.contentKey,
+      bytes(content)
+    );
+    const meta = await encryptJson(this.metadataKey, {
+      path,
+      size: Number(metadata.size) || bytes(content).byteLength,
+      mtime: Number(metadata.mtime) || 0,
+      ctime: Number(metadata.ctime) || 0,
+      type: metadata.type || "file",
+      hash: metadata.hash || "",
+    }, aad(this.vaultId, id, "metadata"));
+    return {
+      id,
+      contentBase64: bytesToBase64(cipherBuffer),
+      contentNonce: bytesToBase64Url(contentNonce),
+      metaNonce: meta.nonce,
+      metaCipher: meta.cipher,
+    };
+  }
+
+  async decryptFileMetadata(record) {
+    if (!record || !record.id || !record.metaNonce || !record.metaCipher) {
+      throw new Error("Encrypted file metadata is incomplete.");
+    }
+    const meta = await decryptJson(
+      this.metadataKey,
+      record.metaNonce,
+      record.metaCipher,
+      aad(this.vaultId, record.id, "metadata")
+    );
+    if (!meta || typeof meta.path !== "string") throw new Error("Encrypted file path is missing.");
+    meta.path = validateVaultPath(meta.path);
+    const expectedId = await this.blindId("file", meta.path);
+    if (expectedId !== record.id) throw new Error("Encrypted file path authentication failed.");
+    return Object.assign({}, record, meta);
+  }
+
+  async decryptFileContent(record, contentBase64) {
+    if (!record || !record.id || !record.contentNonce) throw new Error("Encrypted file content metadata is incomplete.");
+    return webCrypto().subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: base64UrlToBytes(record.contentNonce),
+        additionalData: aad(this.vaultId, record.id, "content"),
+        tagLength: 128,
+      },
+      this.contentKey,
+      base64ToBytes(contentBase64)
+    );
+  }
+
+  async encryptFolder(path) {
+    path = validateVaultPath(path);
+    const id = await this.blindId("folder", path);
+    const meta = await encryptJson(this.metadataKey, { path }, aad(this.vaultId, id, "folder"));
+    return { id, metaNonce: meta.nonce, metaCipher: meta.cipher };
+  }
+
+  async decryptFolder(record) {
+    if (!record || !record.id || !record.metaNonce || !record.metaCipher) {
+      throw new Error("Encrypted folder metadata is incomplete.");
+    }
+    const meta = await decryptJson(
+      this.metadataKey,
+      record.metaNonce,
+      record.metaCipher,
+      aad(this.vaultId, record.id, "folder")
+    );
+    meta.path = validateVaultPath(meta.path);
+    const expectedId = await this.blindId("folder", meta.path);
+    if (expectedId !== record.id) throw new Error("Encrypted folder path authentication failed.");
+    return meta.path;
+  }
+}
+
+module.exports = {
+  PROTOCOL_VERSION,
+  VaultCrypto,
+  generateVaultKey,
+  parseRecoveryCode,
+  parseSecureInviteCode,
+  recoveryCode,
+  secureInviteCode,
+};
+
+  },
   "src/plugin.js": function(module, exports, __require) {
 const { MarkdownView, Modal, Notice, Plugin, TFile, TFolder, addIcon, normalizePath, requestUrl, setIcon } = require("obsidian");
 const {
@@ -1074,10 +1431,19 @@ const {
 const { SyncDeckView } = __require("src/view.js");
 const { SyncDeckSettingTab } = __require("src/settings-tab.js");
 const { EditorPresence } = __require("src/editor-presence.js");
+const {
+  PROTOCOL_VERSION,
+  VaultCrypto,
+  generateVaultKey,
+  parseRecoveryCode,
+  parseSecureInviteCode,
+  recoveryCode,
+  secureInviteCode,
+} = __require("src/crypto.js");
 
 // Terms of Service. Bump this date when TERMS.md changes materially — users are
 // re-prompted to accept when their accepted version != the current one.
-const CURRENT_TERMS_VERSION = "2026-07-06.2";
+const CURRENT_TERMS_VERSION = "2026-07-29.1";
 const TERMS_URL = "https://github.com/ismailivanov/sync-deck/blob/main/TERMS.md";
 
 const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
@@ -1419,7 +1785,16 @@ class VaultInspectModal extends Modal {
 
   async load(sub, list) {
     try {
-      const manifest = await this.plugin.api(`/vaults/${encodeURIComponent(this.vault.vaultId)}/files`);
+      if (Number(this.vault.encryptionVersion) === PROTOCOL_VERSION) {
+        const unlocked = await this.plugin.ensureVaultKeyFor(this.vault);
+        if (!unlocked) {
+          sub.textContent = "This encrypted vault is locked on this device.";
+          return;
+        }
+      }
+      const manifest = await this.plugin.decryptManifest(
+        await this.plugin.api(`/vaults/${encodeURIComponent(this.vault.vaultId)}/files`)
+      );
       const files = (Array.isArray(manifest.files) ? manifest.files.slice() : []).sort((a, b) => a.path.localeCompare(b.path));
       const total = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
       sub.textContent = files.length
@@ -1446,6 +1821,7 @@ class VaultInspectModal extends Modal {
 module.exports = class SyncDeckPlugin extends Plugin {
   async onload() {
     this.data = this.normalizeData(Object.assign(clone(DEFAULT_DATA), await this.loadData() || {}));
+    this.vaultCryptoCache = new Map();
     // Upload intent must survive an app/plugin shutdown. The mtime:size cache is
     // intentionally memory-only, but losing the dirty paths meant a half-finished
     // upload had no explicit retry record until the next open's full scan.
@@ -1566,6 +1942,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.authToken = data.authToken || "";
     data.serverStatus = data.serverStatus || "offline";
     data.remoteUpdatedAt = data.remoteUpdatedAt || "";
+    data.vaultKeys = data.vaultKeys && typeof data.vaultKeys === "object" ? data.vaultKeys : {};
+    data.vaultEncryptionVersions = data.vaultEncryptionVersions && typeof data.vaultEncryptionVersions === "object"
+      ? data.vaultEncryptionVersions
+      : {};
+    data.vaultKeyChecks = data.vaultKeyChecks && typeof data.vaultKeyChecks === "object" ? data.vaultKeyChecks : {};
+    data.pendingEncryptionCleanup = data.pendingEncryptionCleanup && typeof data.pendingEncryptionCleanup === "object"
+      ? data.pendingEncryptionCleanup
+      : null;
     data.vaultStats = Object.assign(clone(DEFAULT_DATA.vaultStats), data.vaultStats || {});
     data.members = Array.isArray(data.members)
       ? data.members.filter((member) => member && !DEMO_MEMBER_EMAILS.has(member.email))
@@ -1636,6 +2020,356 @@ module.exports = class SyncDeckPlugin extends Plugin {
     return data;
   }
 
+  activeEncryptionVersion() {
+    return Number(this.data.vaultEncryptionVersions[this.data.vaultId]) === PROTOCOL_VERSION
+      ? PROTOCOL_VERSION
+      : 0;
+  }
+
+  rememberEncryptionInfo(vaultId, source) {
+    if (!vaultId || !source) return;
+    const version = Number(source.encryptionVersion) === PROTOCOL_VERSION ? PROTOCOL_VERSION : 0;
+    this.data.vaultEncryptionVersions[vaultId] = version;
+    if (version && source.keyCheck) this.data.vaultKeyChecks[vaultId] = String(source.keyCheck);
+  }
+
+  forgetVaultKey(vaultId) {
+    if (!vaultId) return;
+    delete this.data.vaultKeys[vaultId];
+    delete this.data.vaultEncryptionVersions[vaultId];
+    delete this.data.vaultKeyChecks[vaultId];
+    if (this.vaultCryptoCache) {
+      for (const key of this.vaultCryptoCache.keys()) {
+        if (key.startsWith(`${vaultId}:`)) this.vaultCryptoCache.delete(key);
+      }
+    }
+  }
+
+  async getVaultCrypto(vaultId = this.data.vaultId, required = true) {
+    const encodedKey = this.data.vaultKeys && this.data.vaultKeys[vaultId];
+    if (!encodedKey) {
+      if (required) {
+        const error = new Error("This encrypted vault is locked on this device. Import its recovery key first.");
+        error.code = "vault_key_required";
+        throw error;
+      }
+      return null;
+    }
+    this.vaultCryptoCache = this.vaultCryptoCache || new Map();
+    const cacheKey = `${vaultId}:${encodedKey}`;
+    if (!this.vaultCryptoCache.has(cacheKey)) {
+      this.vaultCryptoCache.set(cacheKey, VaultCrypto.create(vaultId, encodedKey));
+    }
+    return this.vaultCryptoCache.get(cacheKey);
+  }
+
+  async createVaultKey(vaultId = this.data.vaultId) {
+    if (!this.data.vaultKeys[vaultId]) this.data.vaultKeys[vaultId] = generateVaultKey();
+    this.data.vaultEncryptionVersions[vaultId] = PROTOCOL_VERSION;
+    const cryptoContext = await this.getVaultCrypto(vaultId);
+    this.data.vaultKeyChecks[vaultId] = await cryptoContext.keyCheck();
+    return cryptoContext;
+  }
+
+  async importVaultKey(vaultId, input, expectedCheck = "") {
+    const key = parseRecoveryCode(input);
+    const cryptoContext = await VaultCrypto.create(vaultId, key);
+    const check = await cryptoContext.keyCheck();
+    if (expectedCheck && check !== expectedCheck) throw new Error("That recovery key does not belong to this vault.");
+    this.data.vaultKeys[vaultId] = key;
+    this.data.vaultEncryptionVersions[vaultId] = PROTOCOL_VERSION;
+    this.data.vaultKeyChecks[vaultId] = expectedCheck || check;
+    this.vaultCryptoCache = this.vaultCryptoCache || new Map();
+    this.vaultCryptoCache.set(`${vaultId}:${key}`, Promise.resolve(cryptoContext));
+    await this.savePluginData();
+    return cryptoContext;
+  }
+
+  async promptForVaultKey(vault) {
+    const value = await new TextPromptModal(this.app, {
+      title: `Unlock ${vault.workspace || "encrypted vault"}`,
+      body: "Paste the SDK1 recovery key from the vault owner. It stays on this device and is never sent to the server.",
+      placeholder: "SDK1-…",
+      confirmText: "Unlock",
+    }).openAndWait();
+    if (!value) return null;
+    return this.importVaultKey(vault.vaultId, value, vault.keyCheck || this.data.vaultKeyChecks[vault.vaultId] || "");
+  }
+
+  async ensureVaultKeyFor(vault) {
+    if (!vault || Number(vault.encryptionVersion) !== PROTOCOL_VERSION) return null;
+    const existing = await this.getVaultCrypto(vault.vaultId, false);
+    if (existing) {
+      const expected = vault.keyCheck || this.data.vaultKeyChecks[vault.vaultId] || "";
+      if (expected && await existing.keyCheck() !== expected) {
+        delete this.data.vaultKeys[vault.vaultId];
+        if (this.vaultCryptoCache) {
+          for (const key of this.vaultCryptoCache.keys()) {
+            if (key.startsWith(`${vault.vaultId}:`)) this.vaultCryptoCache.delete(key);
+          }
+        }
+        await this.savePluginData();
+      } else {
+        return existing;
+      }
+    }
+    return this.promptForVaultKey(vault);
+  }
+
+  async decryptManifest(manifest) {
+    this.rememberEncryptionInfo(manifest.vaultId || this.data.vaultId, manifest);
+    if (Number(manifest.encryptionVersion) !== PROTOCOL_VERSION) return manifest;
+    const vaultId = manifest.vaultId || this.data.vaultId;
+    const cryptoContext = await this.getVaultCrypto(vaultId);
+    if (manifest.keyCheck && await cryptoContext.keyCheck() !== manifest.keyCheck) {
+      throw new Error("The recovery key stored on this device does not match this vault.");
+    }
+    const files = [];
+    for (const record of manifest.files || []) files.push(await cryptoContext.decryptFileMetadata(record));
+    const folders = [];
+    if (Array.isArray(manifest.folders)) {
+      for (const record of manifest.folders) folders.push(await cryptoContext.decryptFolder(record));
+    }
+    return Object.assign({}, manifest, { files, ...(Array.isArray(manifest.folders) ? { folders } : {}) });
+  }
+
+  async blindPresenceId(kind, value) {
+    if (this.activeEncryptionVersion() !== PROTOCOL_VERSION) return String(value);
+    const cryptoContext = await this.getVaultCrypto();
+    return cryptoContext.blindId(kind, value);
+  }
+
+  async copyRecoveryKey(options = {}) {
+    try {
+      const cryptoContext = await this.getVaultCrypto();
+      const code = recoveryCode(cryptoContext.encodedKey);
+      let copied = false;
+      if (navigator.clipboard) {
+        try {
+          await navigator.clipboard.writeText(code);
+          copied = true;
+        } catch (error) { /* use the visible fallback below */ }
+      }
+      if (!options.silent) {
+        if (copied) {
+          new Notice("Recovery key copied. Keep it private: anyone with it and vault access can decrypt the vault.");
+        } else {
+          window.prompt("Copy this Sync Deck recovery key and keep it private:", code);
+        }
+      }
+      return { code, copied };
+    } catch (error) {
+      if (!options.silent) new Notice(error.message);
+      return { code: "", copied: false };
+    }
+  }
+
+  async verifyEncryptedVault(vaultId = this.data.vaultId) {
+    const manifest = await this.decryptManifest(
+      await this.api(`/vaults/${encodeURIComponent(vaultId)}/files`)
+    );
+    if (Number(manifest.encryptionVersion) !== PROTOCOL_VERSION) {
+      throw new Error("replacement vault is not end-to-end encrypted");
+    }
+    const localPaths = this.collectSyncableFiles().map((file) => file.path).sort();
+    const remotePaths = (manifest.files || []).map((file) => file.path).sort();
+    if (JSON.stringify(localPaths) !== JSON.stringify(remotePaths)) {
+      throw new Error("encrypted verification found a file mismatch");
+    }
+    const cryptoContext = await this.getVaultCrypto(vaultId);
+    for (const remoteFile of manifest.files || []) {
+      const response = await this.api(
+        `/vaults/${encodeURIComponent(vaultId)}/files/content?id=${encodeURIComponent(remoteFile.id)}`
+      );
+      const plaintext = await cryptoContext.decryptFileContent(response.file || remoteFile, response.contentBase64);
+      const localFile = this.app.vault.getAbstractFileByPath(remoteFile.path);
+      if (!(localFile instanceof TFile)) throw new Error(`local verification file disappeared: ${remoteFile.path}`);
+      const [remoteHash, localHash] = await Promise.all([
+        sha256Hex(plaintext),
+        sha256Hex(await this.app.vault.readBinary(localFile)),
+      ]);
+      if (!remoteHash || remoteHash !== localHash || (remoteFile.hash && remoteFile.hash !== remoteHash)) {
+        throw new Error(`encrypted content verification failed: ${remoteFile.path}`);
+      }
+    }
+    const localFolders = Array.from(this.getVaultFolders()).sort();
+    const remoteFolders = Array.isArray(manifest.folders) ? manifest.folders.slice().sort() : [];
+    if (JSON.stringify(localFolders) !== JSON.stringify(remoteFolders)) {
+      throw new Error("encrypted verification found a folder mismatch");
+    }
+    return { manifest, remotePaths, remoteFolders };
+  }
+
+  async finishEncryptionCleanup() {
+    const pending = this.data.pendingEncryptionCleanup;
+    if (!pending || pending.newVaultId !== this.data.vaultId) return;
+    try {
+      this.data.syncEnabled = false;
+      const uploaded = await this.scanVault({ upload: true });
+      if (!uploaded) throw new Error("the encrypted upload did not complete");
+      const verified = await this.verifyEncryptedVault(pending.newVaultId);
+      try {
+        await this.api(`/vaults/${encodeURIComponent(pending.oldVaultId)}/delete`, { method: "POST" });
+      } catch (error) {
+        if (!error || error.status !== 404) throw error;
+      }
+      this.forgetVaultKey(pending.oldVaultId);
+      this.data.pendingEncryptionCleanup = null;
+      this.data.syncEnabled = true;
+      this.data.remoteUpdatedAt = verified.manifest.updatedAt || "";
+      this.setRemoteKnownPaths(verified.remotePaths);
+      this.setRemoteKnownFolders(verified.remoteFolders);
+      await this.savePluginData();
+      await this.fetchVaultList();
+      new Notice("Encryption migration finished and the old server vault was removed.");
+    } catch (error) {
+      this.data.syncEnabled = false;
+      await this.savePluginData();
+      new Notice(`Migration is still pending; the old vault was kept: ${error.message}`);
+    }
+  }
+
+  // Legacy upgrades and key rotations copy into a fresh encrypted vault, verify
+  // every path and every downloaded plaintext hash, and only then delete the old
+  // server copy. This avoids a half-migrated state if the network or app dies.
+  // Members must be invited again because the replacement has a new id and key.
+  async enableEndToEndEncryption() {
+    if (!this.data.signedIn || !this.data.vaultInitialized) return;
+    const rotating = this.activeEncryptionVersion() === PROTOCOL_VERSION;
+    if (this.data.vaultOwner && this.data.vaultOwner !== this.data.user.email) {
+      new Notice(`Only the vault owner can ${rotating ? "rotate the encryption key" : "enable end-to-end encryption"}.`);
+      return;
+    }
+    const confirmed = await new ConfirmModal(this.app, {
+      title: rotating ? "Rotate the vault key?" : "Enable end-to-end encryption?",
+      body: rotating
+        ? "Sync Deck will create and fully verify a replacement vault with a new key, then delete the old encrypted server copy. This revokes the old key for future sync. Every member must be invited again, and the old recovery key stops working."
+        : "Sync Deck will pull the latest vault, upload a verified encrypted replacement, then permanently delete the old plaintext server copy. Other members must be invited again. Keep the recovery key: Sync Deck cannot recover it for you.",
+      confirmText: rotating ? "Rotate key" : "Encrypt vault",
+      danger: false,
+    }).openAndWait();
+    if (!confirmed) return;
+
+    const wasSyncEnabled = this.data.syncEnabled;
+    this.data.syncEnabled = false;
+    let waited = 0;
+    while ((this.remotePullRunning || this.autoSyncRunning) && waited < 5000) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      waited += 50;
+    }
+    if (this.remotePullRunning || this.autoSyncRunning) {
+      this.data.syncEnabled = wasSyncEnabled;
+      await this.savePluginData();
+      new Notice("Encryption upgrade stopped because another sync is still running.");
+      return;
+    }
+
+    // Pull once while the old vault is still active, so the migration source is
+    // the newest server state and not merely this device's last local snapshot.
+    await this.pullLatest({ silent: true });
+    if (this.data.serverStatus !== "online") {
+      this.data.syncEnabled = wasSyncEnabled;
+      await this.savePluginData();
+      new Notice("Encryption upgrade stopped because the latest vault could not be pulled.");
+      return;
+    }
+    const syncablePaths = new Set(this.collectSyncableFiles().map((file) => file.path));
+    const omittedRemotePaths = Array.from(this.getRemoteKnownPaths()).filter((path) => !syncablePaths.has(path));
+    if (omittedRemotePaths.length) {
+      this.data.syncEnabled = wasSyncEnabled;
+      await this.savePluginData();
+      new Notice(`Encryption upgrade stopped: ${omittedRemotePaths.length} synced file(s) exceed the current per-file limit.`);
+      return;
+    }
+
+    const originalData = clone(this.data);
+    const oldVaultId = this.data.vaultId;
+    const oldWorkspace = this.data.workspace;
+    const newVaultId = uid("vault");
+    let replacementRegistered = false;
+    let committed = false;
+    let deletionAttempted = false;
+
+    try {
+      this.detachToEmptyVault();
+      this.data.vaultId = newVaultId;
+      this.data.workspace = oldWorkspace;
+      this.data.vaultInitialized = true;
+      this.data.vaultOwner = this.data.user.email || "";
+      await this.createVaultKey(newVaultId);
+      const migrationPaths = this.collectSyncableFiles().map((file) => file.path);
+      this.dirtyUploadPaths = new Set(migrationPaths);
+      this.pendingUploadsAtOpen = new Set(migrationPaths);
+      this.data.pendingUploads = migrationPaths;
+      this.data.pendingEncryptionCleanup = {
+        oldVaultId,
+        newVaultId,
+        mode: rotating ? "rotation" : "legacy-upgrade",
+        startedAt: new Date().toISOString(),
+      };
+      await this.savePluginData();
+      await this.registerVault();
+      replacementRegistered = true;
+
+      const uploaded = await this.scanVault({ upload: true });
+      if (!uploaded) throw new Error("the encrypted upload did not complete");
+
+      const verified = await this.verifyEncryptedVault(newVaultId);
+
+      // Verification passed: only now remove the old server-side vault.
+      deletionAttempted = true;
+      await this.api(`/vaults/${encodeURIComponent(oldVaultId)}/delete`, { method: "POST" });
+      committed = true;
+      this.forgetVaultKey(oldVaultId);
+      this.data.pendingEncryptionCleanup = null;
+      this.data.syncEnabled = true;
+      this.data.remoteUpdatedAt = verified.manifest.updatedAt || "";
+      this.setRemoteKnownPaths(verified.remotePaths);
+      this.setRemoteKnownFolders(verified.remoteFolders);
+      await this.savePluginData();
+      await this.fetchVaultMembers();
+      await this.fetchVaultList();
+
+      const recovery = await this.copyRecoveryKey({ silent: true });
+      const completed = rotating ? "Encryption key rotated" : "End-to-end encryption enabled";
+      new Notice(recovery.copied
+        ? `${completed}. Recovery key copied; re-invite existing members.`
+        : `${completed}. Open Recovery key now and save it; re-invite existing members.`);
+    } catch (error) {
+      // Deleting the old vault is the commit point. Never roll back or delete the
+      // verified replacement after that irreversible request succeeded.
+      if (committed) {
+        this.data.syncEnabled = true;
+        try { await this.savePluginData(); } catch (saveError) { /* retry on next state change */ }
+        new Notice(`Encryption completed, but the final UI refresh failed: ${error.message}`);
+        return;
+      }
+      // A dropped response makes a delete request's outcome unknowable. Keep the
+      // already-verified replacement and never "roll back" to a vault that may
+      // actually have been deleted. The old copy, if it survived, remains visible
+      // in the vault list for an explicit later cleanup.
+      if (deletionAttempted) {
+        this.data.syncEnabled = false;
+        try {
+          await this.savePluginData();
+          await this.fetchVaultList();
+        } catch (refreshError) { /* non-fatal */ }
+        new Notice(`Encrypted replacement is active, but old-vault cleanup could not be confirmed: ${error.message}`);
+        return;
+      }
+      if (replacementRegistered) {
+        try { await this.api(`/vaults/${encodeURIComponent(newVaultId)}/delete`, { method: "POST" }); } catch (cleanupError) { /* best-effort */ }
+      }
+      this.data = originalData;
+      this.data.syncEnabled = wasSyncEnabled;
+      this.dirtyUploadPaths = new Set(this.data.pendingUploads || []);
+      this.pendingUploadsAtOpen = new Set(this.data.pendingUploads || []);
+      this.uploadedSignatures = {};
+      await this.savePluginData();
+      new Notice(`Encryption upgrade failed safely; the original vault is unchanged: ${error.message}`);
+    }
+  }
+
   upsertCurrentUserMember() {
     if (!this.data.user.email) return;
 
@@ -1660,6 +2394,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       method: options.method || "GET",
       headers: {
         "content-type": "application/json",
+        "x-syncdeck-e2ee": String(PROTOCOL_VERSION),
         ...(this.data.authToken ? { authorization: `Bearer ${this.data.authToken}` } : {}),
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
@@ -1706,15 +2441,26 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
   async registerVault() {
     if (!this.data.authToken) return;
-    await this.api("/vaults/register", {
+    const cryptoContext = await this.getVaultCrypto(this.data.vaultId, false);
+    const result = await this.api("/vaults/register", {
       method: "POST",
       body: {
         vaultId: this.data.vaultId,
         deviceId: this.data.deviceId,
         workspace: this.data.workspace,
         stats: this.data.vaultStats,
+        encryptionVersion: cryptoContext ? PROTOCOL_VERSION : 0,
+        ...(cryptoContext ? { keyCheck: await cryptoContext.keyCheck() } : {}),
       },
     });
+    if (cryptoContext && Number(result.encryptionVersion) !== PROTOCOL_VERSION) {
+      throw new Error("The Sync Deck server does not support end-to-end encrypted vaults yet.");
+    }
+    if (cryptoContext && result.keyCheck && result.keyCheck !== await cryptoContext.keyCheck()) {
+      throw new Error("The server returned a different key check for this encrypted vault.");
+    }
+    this.rememberEncryptionInfo(this.data.vaultId, result);
+    return result;
   }
 
   async pushScanSummary() {
@@ -1722,7 +2468,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
     await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/scan`, {
       method: "POST",
       body: {
-        stats: this.data.vaultStats,
+        // File types and local path-derived categories are encrypted metadata.
+        // Do not mirror those scan details to the server for E2EE vaults.
+        stats: this.activeEncryptionVersion() === PROTOCOL_VERSION ? {} : this.data.vaultStats,
         queueLength: this.data.syncQueue.length,
       },
     });
@@ -1736,6 +2484,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     // trashed (local-only files the user made are left), and they go to Obsidian
     // trash so they stay recoverable. Then detach to a fresh personal vault so
     // nothing keeps syncing.
+    const revokedVaultId = this.data.vaultId;
     this.data.serverStatus = "online";
     this.data.syncEnabled = false;
     this.data.syncProgress = 0;
@@ -1767,6 +2516,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.pendingFolderDeletes = [];
     this.data.syncedHashes = {};
     this.data.remoteUpdatedAt = "";
+    this.forgetVaultKey(revokedVaultId);
     this.uploadedSignatures = {};
     this.dirtyUploadPaths = new Set();
     this.pendingUploadsAtOpen = new Set();
@@ -1905,6 +2655,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.workspace = name;
       this.data.lastSync = "";
       this.data.vaultInitialized = true; // the include-files choice is made here
+      await this.createVaultKey();
+      if (choice === "add") {
+        const initialPaths = this.collectSyncableFiles().map((file) => file.path);
+        this.dirtyUploadPaths = new Set(initialPaths);
+        this.pendingUploadsAtOpen = new Set(initialPaths);
+        this.data.pendingUploads = initialPaths;
+      }
       await this.savePluginData();
       await this.registerVault();
       if (choice === "add") {
@@ -1931,7 +2688,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.syncEnabled = true;
       await this.fetchVaultMembers();
       await this.fetchPlan();
-      new Notice(choice === "add" ? `Created "${name}" with your files. Sync is on.` : `Created "${name}" (empty). Sync is on.`);
+      const recovery = await this.copyRecoveryKey({ silent: true });
+      const recoveryMessage = recovery.copied ? "Recovery key copied" : "Open Recovery key now and save it";
+      new Notice(choice === "add"
+        ? `Created "${name}" with E2EE. ${recoveryMessage}; sync is on.`
+        : `Created "${name}" empty with E2EE. ${recoveryMessage}; sync is on.`);
     } catch (error) {
       new Notice(`Could not create the vault: ${error.message}`);
     } finally {
@@ -1973,6 +2734,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }
     try {
       await this.api(`/vaults/${encodeURIComponent(deletingId)}/delete`, { method: "POST" });
+      this.forgetVaultKey(deletingId);
+      if (this.data.pendingEncryptionCleanup
+        && this.data.pendingEncryptionCleanup.newVaultId === deletingId) {
+        this.data.pendingEncryptionCleanup = null;
+      }
+      await this.savePluginData();
       new Notice(`Deleted ${name}.`);
     } catch (error) {
       new Notice(`Could not delete: ${error.message}`);
@@ -2058,6 +2825,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (!isOwner) {
       try {
         await this.api(`/vaults/${encodeURIComponent(leavingId)}/leave`, { method: "POST" });
+        this.forgetVaultKey(leavingId);
+        await this.savePluginData();
       } catch (error) {
         new Notice(isActive
           ? `Left ${name} on this device (files kept), but the server didn't confirm: ${error.message}`
@@ -2080,6 +2849,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       const result = await this.api("/vaults");
       if (Array.isArray(result.vaults)) {
         this.data.vaultList = result.vaults;
+        result.vaults.forEach((vault) => this.rememberEncryptionInfo(vault.vaultId, vault));
         await this.savePluginData();
         this.refreshViews();
       }
@@ -2133,6 +2903,14 @@ module.exports = class SyncDeckPlugin extends Plugin {
       }
       if (!confirmed) return; // finally just releases the guard; sync state untouched
 
+      // Do not trash the current vault until the target's key has been verified.
+      // A cancelled or wrong recovery key therefore leaves the current vault
+      // completely untouched.
+      if (Number(target.encryptionVersion) === PROTOCOL_VERSION) {
+        const unlocked = await this.ensureVaultKeyFor(target);
+        if (!unlocked) return;
+      }
+
       started = true;
       this.data.syncEnabled = false;
       this.data.syncProgress = 0;
@@ -2165,6 +2943,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.workspace = target.workspace || this.data.workspace;
       this.data.role = target.role || "Worker";
       this.data.vaultOwner = target.owner || "";
+      this.rememberEncryptionInfo(target.vaultId, target);
       this.data.vaultInitialized = true; // switching to an existing, set-up vault
       this.data.members = [];
       this.data.remoteKnownPaths = [];
@@ -2489,9 +3268,16 @@ module.exports = class SyncDeckPlugin extends Plugin {
     const add = Array.from(localFolders).filter((f) => !knownFolders.has(f));
     const remove = Array.from(knownFolders).filter((f) => folderPending.has(f) && !localFolders.has(f));
     if (add.length || remove.length) {
+      const encrypted = this.activeEncryptionVersion() === PROTOCOL_VERSION;
+      const cryptoContext = encrypted ? await this.getVaultCrypto() : null;
       await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/folders`, {
         method: "POST",
-        body: { add, remove },
+        body: encrypted
+          ? {
+            add: await Promise.all(add.map((folderPath) => cryptoContext.encryptFolder(folderPath))),
+            remove: await Promise.all(remove.map((folderPath) => cryptoContext.blindId("folder", folderPath))),
+          }
+          : { add, remove },
       });
     }
     const next = new Set(knownFolders);
@@ -2591,25 +3377,34 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
       try {
         const buffer = await this.app.vault.readBinary(file);
-        const contentBase64 = arrayBufferToBase64(buffer);
+        const hash = await sha256Hex(buffer);
+        const encrypted = this.activeEncryptionVersion() === PROTOCOL_VERSION;
+        const wireFile = encrypted
+          ? await (await this.getVaultCrypto()).encryptFile(file.path, buffer, {
+            size: file.stat.size || 0,
+            mtime: file.stat.mtime || 0,
+            ctime: file.stat.ctime || 0,
+            type: isMarkdownPath(file.path) ? "markdown" : "file",
+            hash: hash || "",
+          })
+          : {
+            path: file.path,
+            size: file.stat.size || 0,
+            mtime: file.stat.mtime || 0,
+            ctime: file.stat.ctime || 0,
+            type: isMarkdownPath(file.path) ? "markdown" : "file",
+            contentBase64: arrayBufferToBase64(buffer),
+          };
         const uploadResult = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`, {
           method: "POST",
           body: {
             deviceId: this.data.deviceId,
-            files: [{
-              path: file.path,
-              size: file.stat.size || 0,
-              mtime: file.stat.mtime || 0,
-              ctime: file.stat.ctime || 0,
-              type: isMarkdownPath(file.path) ? "markdown" : "file",
-              contentBase64,
-            }],
+            files: [wireFile],
           },
         });
         if (uploadResult && uploadResult.storage) this.applyStorageFromManifest(uploadResult);
         paths.push(file.path);
         nextSignatures[file.path] = signature;
-        const hash = await sha256Hex(buffer);
         this.data.syncedHashes = this.data.syncedHashes || {};
         // If we can't hash locally, drop the entry (force a re-seed on next pull)
         // rather than leaving a stale hash that could wrongly skip a real edit.
@@ -2670,9 +3465,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
       (path) => pending.has(path) && !this.app.vault.getAbstractFileByPath(path) && !uploadedLower.has(path.toLowerCase())
     );
     if (toDelete.length) {
+      const encrypted = this.activeEncryptionVersion() === PROTOCOL_VERSION;
+      const cryptoContext = encrypted ? await this.getVaultCrypto() : null;
       await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/delete`, {
         method: "POST",
-        body: { paths: toDelete },
+        body: encrypted
+          ? { ids: await Promise.all(toDelete.map((filePath) => cryptoContext.blindId("file", filePath))) }
+          : { paths: toDelete },
       });
     }
     const deletedSet = new Set(toDelete);
@@ -2818,7 +3617,8 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.remotePullRunning = true;
     try {
       await this.registerVault();
-      const manifest = options.manifest || await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      const encryptedManifest = options.manifest || await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files`);
+      const manifest = await this.decryptManifest(encryptedManifest);
       // Guard against a stale manifest: a passed-in manifest (from a background
       // poll) may belong to a vault we've since switched away from. Never stamp
       // one vault's file list as another's baseline / trash across vaults.
@@ -2908,8 +3708,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
           // local file and save the incoming version alongside it. Both versions
           // then upload and coexist on every device; the user reconciles them.
           if (remoteFile.hash && !startup.has(remoteFile.path) && !hadPriorHash && localFile instanceof TFile && knownHash !== undefined) {
-            const remoteC = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
-            const remoteContent = base64ToArrayBuffer(remoteC.contentBase64);
+            const encrypted = Number(manifest.encryptionVersion) === PROTOCOL_VERSION;
+            const remoteC = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?${encrypted ? "id" : "path"}=${encodeURIComponent(encrypted ? remoteFile.id : remoteFile.path)}`);
+            const remoteContent = encrypted
+              ? await (await this.getVaultCrypto()).decryptFileContent(remoteC.file || remoteFile, remoteC.contentBase64)
+              : base64ToArrayBuffer(remoteC.contentBase64);
             const conflictPath = normalizePath(this.conflictCopyPath(remoteFile.path));
             await this.ensureParentFolder(conflictPath);
             this.pullTouchedPaths.add(conflictPath);
@@ -2925,8 +3728,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
           }
 
           this.pullTouchedPaths.add(remoteFile.path);
-          const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?path=${encodeURIComponent(remoteFile.path)}`);
-          const content = base64ToArrayBuffer(remote.contentBase64);
+          const encrypted = Number(manifest.encryptionVersion) === PROTOCOL_VERSION;
+          const remote = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/files/content?${encrypted ? "id" : "path"}=${encodeURIComponent(encrypted ? remoteFile.id : remoteFile.path)}`);
+          const content = encrypted
+            ? await (await this.getVaultCrypto()).decryptFileContent(remote.file || remoteFile, remote.contentBase64)
+            : base64ToArrayBuffer(remote.contentBase64);
           await this.ensureParentFolder(remoteFile.path);
 
           if (localFile instanceof TFile) await this.app.vault.modifyBinary(localFile, content);
@@ -3292,28 +4098,63 @@ module.exports = class SyncDeckPlugin extends Plugin {
       new Notice("Sign in first.");
       return;
     }
+    if (this.data.pendingEncryptionCleanup
+      && this.data.pendingEncryptionCleanup.newVaultId === this.data.vaultId) {
+      await this.finishEncryptionCleanup();
+      return;
+    }
 
     if (!this.data.syncEnabled) {
       // Enabling. On the FIRST-EVER sync of this vault, ask whether to include the
       // existing local files rather than silently uploading the whole vault.
+      let createdEncryptedVault = false;
       if (!this.data.vaultInitialized) {
         const choice = await this.promptIncludeLocalFiles(this.data.workspace);
         if (choice === null) return; // cancelled — stay paused
+        await this.createVaultKey();
+        createdEncryptedVault = true;
+        const initialPaths = choice === "add"
+          ? this.collectSyncableFiles().map((file) => file.path)
+          : [];
+        this.dirtyUploadPaths = new Set(initialPaths);
+        this.pendingUploadsAtOpen = new Set(initialPaths);
+        this.data.pendingUploads = initialPaths;
+        // Persist the key and full initial upload intent BEFORE the first network
+        // request. A crash mid-upload can then resume without losing the only key
+        // or mistaking a partial remote manifest for the complete vault.
+        await this.savePluginData();
         this.data.syncEnabled = true;
         this.data.vaultInitialized = true; // choice made; don't re-ask on resume
         if (choice === "empty") {
           this.seedUploadSignaturesFromDisk();
           await this.savePluginData();
-          try { await this.registerVault(); } catch (error) { /* loops will retry */ }
+          try {
+            await this.registerVault();
+          } catch (error) {
+            this.data.syncEnabled = false;
+            await this.savePluginData();
+            new Notice(`Encrypted vault could not start: ${error.message}`);
+            return;
+          }
           this.refreshViews();
-          new Notice("Vault sync started (empty).");
+          const recovery = await this.copyRecoveryKey({ silent: true });
+          new Notice(recovery.copied
+            ? "Encrypted vault started empty. Recovery key copied."
+            : "Encrypted vault started empty. Open Recovery key now and save it.");
           return;
         }
       } else {
         this.data.syncEnabled = true;
       }
       const synced = await this.scanVault({ upload: true });
-      new Notice(synced ? "Vault sync started." : "Vault sync failed.");
+      const recovery = synced && createdEncryptedVault
+        ? await this.copyRecoveryKey({ silent: true })
+        : { copied: false };
+      new Notice(synced
+        ? (createdEncryptedVault
+          ? (recovery.copied ? "Encrypted vault started. Recovery key copied." : "Encrypted vault started. Open Recovery key now and save it.")
+          : "Vault sync started.")
+        : "Vault sync failed.");
     } else {
       this.data.syncEnabled = false;
       await this.savePluginData();
@@ -3347,9 +4188,19 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.syncEnabled = true;
       await this.savePluginData();
       const invite = await this.api(`/vaults/${encodeURIComponent(this.data.vaultId)}/invites`, { method: "POST" });
-      if (navigator.clipboard) await navigator.clipboard.writeText(invite.code).catch(() => {});
+      const encrypted = this.activeEncryptionVersion() === PROTOCOL_VERSION;
+      const code = encrypted
+        ? secureInviteCode(invite.code, (await this.getVaultCrypto()).encodedKey)
+        : invite.code;
+      let copied = false;
+      if (navigator.clipboard) {
+        try { await navigator.clipboard.writeText(code); copied = true; } catch (error) { /* visible fallback below */ }
+      }
+      if (!copied) window.prompt("Copy this Sync Deck invite:", code);
       await this.fetchVaultMembers();
-      new Notice(`Invite code copied: ${invite.code}`);
+      new Notice(encrypted
+        ? `${copied ? "Encrypted invite copied" : "Encrypted invite created"}. Send it through a private channel; it contains the vault key.`
+        : (copied ? `Invite code copied: ${invite.code}` : "Invite code created."));
     } catch (error) {
       if (isVaultAccessError(error)) {
         await this.markVaultAccessDenied("invite");
@@ -3369,7 +4220,17 @@ module.exports = class SyncDeckPlugin extends Plugin {
     if (!code) return;
 
     try {
-      const result = await this.api(`/invites/${encodeURIComponent(code.trim())}/accept`, { method: "POST" });
+      let parsedInvite = null;
+      if (/^SD1-/i.test(code.trim())) parsedInvite = parseSecureInviteCode(code);
+      const serverCode = parsedInvite ? parsedInvite.serverCode : code.trim();
+      const result = await this.api(`/invites/${encodeURIComponent(serverCode)}/accept`, { method: "POST" });
+      this.rememberEncryptionInfo(result.vaultId, result);
+      if (Number(result.encryptionVersion) === PROTOCOL_VERSION) {
+        if (!parsedInvite) {
+          throw new Error("This vault is encrypted. Ask the owner for a complete SD1 encrypted invite.");
+        }
+        await this.importVaultKey(result.vaultId, recoveryCode(parsedInvite.key), result.keyCheck || "");
+      }
 
       // You're joining someone else's vault. Decide what happens to the files
       // already in this Obsidian vault: start clean (move them to the recoverable
@@ -3394,6 +4255,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.workspace = result.workspace || this.data.workspace;
       this.data.role = result.role || "Worker";
       this.data.vaultOwner = result.owner || this.data.vaultOwner || "";
+      this.rememberEncryptionInfo(result.vaultId, result);
       this.data.vaultInitialized = true; // joined an existing, set-up vault
       this.data.members = Array.isArray(result.members) ? result.members : this.data.members;
       // Joining a vault means "sync me", with no extra step. Start from a clean
