@@ -529,3 +529,190 @@
   border-top: 1px solid var(--background-modifier-border);
 }
 .sd-footer .sd-text-button { font-size: 12px; }
+
+@media (max-width: 480px) {
+  .sd-root {
+    min-width: 0;
+    overflow-x: hidden;
+  }
+
+  .sd-shell {
+    gap: 14px;
+    max-width: none;
+    padding: 10px 8px calc(20px + env(safe-area-inset-bottom));
+  }
+
+  .sd-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .sd-brand {
+    justify-content: space-between;
+    min-width: 0;
+  }
+
+  .sd-account {
+    justify-content: flex-end;
+  }
+
+  .sd-card {
+    border-radius: 12px;
+    padding: 12px;
+  }
+
+  .sd-vc-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sd-vc-name {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .sd-vc-name strong {
+    flex: 1 1 120px;
+  }
+
+  .sd-vc-head-actions {
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .sd-vc-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sd-vc-actions .sd-primary-btn:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .sd-security-row {
+    align-items: stretch;
+  }
+
+  .sd-security-row > span:first-child {
+    flex-basis: 100%;
+  }
+
+  .sd-security-row .sd-text-button {
+    flex: 1 1 120px;
+    white-space: normal;
+  }
+
+  .sd-sync-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .sd-sync-time {
+    flex-basis: calc(100% - 15px);
+    margin-left: 15px;
+  }
+
+  .sd-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .sd-row-main {
+    width: 100%;
+  }
+
+  .sd-row-side,
+  .sd-member-side {
+    justify-content: flex-end;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .sd-row-side .sd-text-button:not(.sd-icon-btn) {
+    flex: 1;
+  }
+
+  .sd-actions-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sd-actions-row .sd-text-button {
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .sd-text-button {
+    min-height: 40px;
+  }
+
+  .sd-icon-btn {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+
+  .sd-footer {
+    flex-wrap: wrap;
+  }
+
+  .sd-code-input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .sd-modal-actions {
+    flex-wrap: wrap;
+  }
+
+  .sd-modal-actions button {
+    flex: 1 1 120px;
+    min-height: 42px;
+  }
+
+  .sd-plan-row {
+    grid-template-columns: minmax(0, 1fr) 56px 64px;
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .sd-plan-cell {
+    min-width: 0;
+  }
+
+  .sd-plan-label {
+    overflow-wrap: anywhere;
+  }
+
+  .sd-price-options {
+    grid-template-columns: 1fr;
+  }
+
+  .sd-inspect-row {
+    padding-inline: 8px;
+  }
+
+  .modal:has(.sd-invite-modal),
+  .modal:has(.sd-confirm-modal),
+  .modal:has(.sd-prompt-modal),
+  .modal:has(.sd-choice-modal),
+  .modal:has(.sd-inspect-modal),
+  .modal:has(.sd-upgrade-modal) {
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .sd-text-button {
+    min-height: 40px;
+  }
+
+  .sd-icon-btn {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+}
