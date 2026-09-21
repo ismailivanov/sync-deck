@@ -179,6 +179,139 @@ async function decryptJson(key, nonce, cipher, additionalData) {
   return JSON.parse(textDecoder.decode(plaintext));
 }
 
+
+// ---- Vault password escrow (v1) ---------------------------------------------
+// A user-chosen vault password wraps the 256-bit vault keys so a NEW device can
+// unlock them after signing in, without anyone typing an SDK1 recovery key. The
+// wrapping happens on the device: the server only ever stores the sealed
+// envelope and never sees the password or a raw vault key.
+//
+// The file/metadata/folder formats above are deliberately untouched — ciphertext
+// already on the server keeps decrypting exactly as before.
+const ESCROW_VERSION = 1;
+const ESCROW_KDF = "PBKDF2-SHA256";
+const ESCROW_MIN_ITERATIONS = 200000;
+const ESCROW_MAX_ITERATIONS = 4000000;
+const ESCROW_DEFAULT_ITERATIONS = 650000;
+// Calibration never goes above this. A fast desktop would otherwise pick a cost
+// that a phone — which must derive the SAME key to unlock — takes seconds to pay.
+const ESCROW_CALIBRATION_CEILING = 1200000;
+const ESCROW_MIN_PASSPHRASE_LENGTH = 12;
+
+// Short, unambiguous words. Exactly 256 entries, so one random byte selects one
+// word with no modulo bias: 8 words = 64 bits of entropy.
+const PASSPHRASE_WORDS = ("able acid acorn actor adapt agent airy alarm album alert alley amber anchor angle ankle apple apron arbor arena armor arrow ashen aspen atlas attic audio autumn awake axis bacon badge bagel baker balmy banjo barge basil basin baton beach beacon beam bean bench berry birch bison blade blaze bloom blue board bolt bonus boost booth botany bottle boulder brave bread breeze brick bridge brisk broom brush bubble bucket buffalo bugle bunny bureau burrow butter cabin cable cactus camel candle canoe canvas canyon carbon cargo carpet carrot castle cedar cello census chalk charm cheese cherry chess chime chorus cider cinema circus citrus clamp clay clever cliff cloak clock cloud clover coast cobalt cocoa coffee comet compass copper coral cosmic cotton cougar county cover coyote crane crater crayon creek crest cricket crisp crown crystal cube cumin curve cyclone daisy dancer dapper dawn deacon deck delta denim desert diesel digit diner dinner ditch dive dock dolphin domino donor double dove dozen draft dragon drift drum duet dune dusk eagle earth easel east echo eclipse edge eight elbow elder electric elm ember emerald empty engine enter envoy equal era escape ether even exact exit fable fabric falcon fancy farm feather fennel fern ferry fiber fiddle field fig filter finch fjord flame flask fleet flint float flora flute foam focus foggy folk forest forge fossil fox frame free fresh frost fuel fungus funnel galaxy garden gecko ginger glacier glass globe glove golden goose grain granite grape gravel green grove guitar gulf gust hammer harbor harvest hazel heather helm heron hickory").split(/\s+/);
+
+function normalizePassphrase(value) {
+  // NFKC so a password typed on a phone keyboard matches one typed on a laptop.
+  return String(value == null ? "" : value).normalize("NFKC").trim();
+}
+
+// Only called when SETTING a password, never when deriving — an existing short
+// password must keep working after this threshold changes.
+function assertPassphraseStrength(value) {
+  const text = normalizePassphrase(value);
+  if (text.length < ESCROW_MIN_PASSPHRASE_LENGTH) {
+    throw new Error(`A vault password needs at least ${ESCROW_MIN_PASSPHRASE_LENGTH} characters.`);
+  }
+  return text;
+}
+
+function suggestPassphrase(words = 8) {
+  const count = Math.max(4, Math.min(12, Number(words) || 8));
+  const picks = randomBytes(count);
+  const out = [];
+  for (let i = 0; i < count; i += 1) out.push(PASSPHRASE_WORDS[picks[i] & 255]);
+  return out.join("-");
+}
+
+function generateEscrowSalt() {
+  return bytesToBase64Url(randomBytes(16));
+}
+
+function normalizeEscrowParams(params) {
+  const source = params || {};
+  if (source.kdf !== ESCROW_KDF) throw new Error("Unsupported vault password format.");
+  const iterations = Number(source.iterations);
+  if (!Number.isInteger(iterations) || iterations < ESCROW_MIN_ITERATIONS || iterations > ESCROW_MAX_ITERATIONS) {
+    throw new Error("Unsupported vault password settings.");
+  }
+  const salt = String(source.salt || "");
+  if (base64UrlToBytes(salt).length !== 16) throw new Error("Unsupported vault password settings.");
+  return { kdf: ESCROW_KDF, iterations, salt };
+}
+
+// Binds the envelope to the account, the vault and the exact KDF parameters, so
+// a hostile server cannot move an envelope between vaults or users, and an
+// envelope sealed under one cost cannot be opened under another. (Choosing which
+// parameters this device SEALS with is enforced separately, in plugin.js: they
+// are adopted only after they have opened a real record.)
+function escrowAad(email, vaultId, params) {
+  const safe = normalizeEscrowParams(params);
+  return textEncoder.encode(
+    `syncdeck:escrow:v${ESCROW_VERSION}:${String(email || "").toLowerCase()}:${String(vaultId)}:${safe.kdf}:${safe.iterations}:${safe.salt}`
+  );
+}
+
+async function deriveEscrowKey(passphrase, params) {
+  const safe = normalizeEscrowParams(params);
+  const subtle = webCrypto().subtle;
+  const material = await subtle.importKey(
+    "raw",
+    textEncoder.encode(normalizePassphrase(passphrase)),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const derived = await subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt: base64UrlToBytes(safe.salt), iterations: safe.iterations },
+    material,
+    256
+  );
+  // Not extractable: the wrapping key can never be written to disk.
+  return subtle.importKey("raw", derived, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+async function wrapVaultKey(wrappingKey, email, vaultId, encodedKey, keyCheck, params) {
+  if (base64UrlToBytes(encodedKey).length !== 32) throw new Error("Vault key must be 256 bits.");
+  const sealed = await encryptJson(
+    wrappingKey,
+    { k: encodedKey, kc: String(keyCheck || ""), vid: String(vaultId) },
+    escrowAad(email, vaultId, params)
+  );
+  return { v: ESCROW_VERSION, nonce: sealed.nonce, cipher: sealed.cipher };
+}
+
+async function unwrapVaultKey(wrappingKey, email, vaultId, envelope, params) {
+  if (!envelope || Number(envelope.v) !== ESCROW_VERSION || !envelope.nonce || !envelope.cipher) {
+    throw new Error("This vault password record is damaged.");
+  }
+  // A wrong password fails the GCM tag here — there is no separate verifier to
+  // give anyone holding the envelope a cheaper guessing oracle.
+  const payload = await decryptJson(wrappingKey, envelope.nonce, envelope.cipher, escrowAad(email, vaultId, params));
+  if (!payload || payload.vid !== String(vaultId)) throw new Error("This vault password record is damaged.");
+  if (base64UrlToBytes(payload.k).length !== 32) throw new Error("This vault password record is damaged.");
+  return { key: payload.k, keyCheck: String(payload.kc || "") };
+}
+
+// PBKDF2 is the only password KDF available in Obsidian's runtime (no Argon2 in
+// Web Crypto, and build.js cannot bundle WASM), so cost is bought with
+// iterations. Measure this device and scale up from the floor, never below it.
+async function calibrateEscrowIterations(budgetMs = 400) {
+  const params = { kdf: ESCROW_KDF, iterations: ESCROW_MIN_ITERATIONS, salt: generateEscrowSalt() };
+  let perIteration = 0;
+  try {
+    const started = Date.now();
+    await deriveEscrowKey("calibration-probe-passphrase", params);
+    perIteration = (Date.now() - started) / ESCROW_MIN_ITERATIONS;
+  } catch (error) {
+    return ESCROW_DEFAULT_ITERATIONS;
+  }
+  if (!(perIteration > 0)) return ESCROW_CALIBRATION_CEILING;
+  const scaled = Math.round(Number(budgetMs) / perIteration / 50000) * 50000;
+  return Math.min(ESCROW_CALIBRATION_CEILING, Math.max(ESCROW_DEFAULT_ITERATIONS, scaled));
+}
+
 class VaultCrypto {
   static async create(vaultId, encodedKey) {
     const masterKey = base64UrlToBytes(encodedKey);
@@ -305,11 +438,25 @@ class VaultCrypto {
 }
 
 module.exports = {
+  ESCROW_DEFAULT_ITERATIONS,
+  ESCROW_KDF,
+  ESCROW_MAX_ITERATIONS,
+  ESCROW_MIN_ITERATIONS,
+  ESCROW_MIN_PASSPHRASE_LENGTH,
+  ESCROW_VERSION,
   PROTOCOL_VERSION,
   VaultCrypto,
+  assertPassphraseStrength,
+  calibrateEscrowIterations,
+  deriveEscrowKey,
+  generateEscrowSalt,
   generateVaultKey,
+  normalizePassphrase,
   parseRecoveryCode,
   parseSecureInviteCode,
   recoveryCode,
   secureInviteCode,
+  suggestPassphrase,
+  unwrapVaultKey,
+  wrapVaultKey,
 };

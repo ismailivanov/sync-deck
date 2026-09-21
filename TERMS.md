@@ -1,6 +1,6 @@
 # Sync Deck — Terms of Service & Privacy Notice
 
-**Last updated: 29 July 2026**
+**Last updated: 22 September 2026**
 
 Welcome to Sync Deck. By installing, enabling, or using the Sync Deck plugin and
 the Sync Deck hosted service (together, **"Sync Deck"** or **"the Service"**), you
@@ -59,6 +59,11 @@ any privacy matter directly with the operator at the contact address below.
 - **The encrypted form of content you choose to sync**: ciphertext for your files,
   filenames, folder paths, and protected file metadata. Legacy vaults that you
   have not yet upgraded are stored without end-to-end encryption.
+- **Sealed key records, only if you turn on the optional vault password**: your
+  vault keys encrypted on your device with a key derived from that password. We
+  receive the sealed records only. We never receive the vault password itself,
+  the key derived from it, or a usable vault key, and we cannot open these
+  records. You can delete them at any time by turning the vault password off.
 - **Technical and usage data** needed to run and protect the Service: a device
   identifier, timestamps, and your IP address (used for rate-limiting and abuse
   prevention).
@@ -175,8 +180,8 @@ New vaults, and older vaults after the owner completes the in-app upgrade, encry
 file contents, filenames, folder paths, protected file metadata, and synced Task
 Deck board/card identifiers on a member's device before upload. The server stores
 encrypted blobs and opaque identifiers and does not receive the vault's
-cryptographic key. Encryption uses standard authenticated cryptography; the
-technical design and threat model are documented in
+cryptographic key in usable form. Encryption uses standard authenticated
+cryptography; the technical design and threat model are documented in
 [docs/E2EE.md](docs/E2EE.md).
 
 End-to-end encryption does **not** hide all service metadata. We can still process
@@ -194,6 +199,19 @@ responsibility, and an `SD1` invite includes key material plus a short-lived,
 single-use membership code and must be shared privately. We cannot reset or
 recover a lost vault key and cannot decrypt the vault if all authorized members
 lose it.
+
+**Optional vault password.** You may set a vault password so that signing in on a
+new device unlocks your vaults without a recovery key. If you do, your vault keys
+are sealed on your device with a key derived from that password and the sealed
+records are stored on our servers. We never receive the password or the key
+derived from it, and we cannot open those records. You should understand the
+trade-off: anyone who obtains the sealed records — including us, anyone who
+breaches our servers or a backup of them, or anyone who steals your session token
+— could attempt to guess your vault password offline. Without a vault password, no
+amount of access to our servers can recover a vault key. Choose a strong, unique
+password or use the one Sync Deck generates for you. We cannot reset or recover a
+forgotten vault password. Turning the vault password off deletes the sealed
+records from our servers.
 
 Vaults created before this feature remain visibly marked **Legacy** until their
 owner enables E2EE. During migration, Sync Deck first creates and verifies an

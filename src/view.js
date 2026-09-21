@@ -193,7 +193,14 @@ class SyncDeckView extends ItemView {
     ));
     head.append(nameWrap);
     const headActions = createElement("div", "sd-vc-head-actions");
-    headActions.append(textButton("eye", "", () => this.plugin.inspectVault({ vaultId: data.vaultId, workspace: data.workspace }), "sd-icon-btn"));
+    headActions.append(textButton("eye", "", () => this.plugin.inspectVault({
+      vaultId: data.vaultId,
+      workspace: data.workspace,
+      // Without these the inspect modal could not tell an encrypted vault from a
+      // legacy one, so it never offered to unlock — it just said "locked".
+      encryptionVersion: encrypted ? 1 : 0,
+      keyCheck: (data.vaultKeyChecks && data.vaultKeyChecks[data.vaultId]) || "",
+    }), "sd-icon-btn"));
     const ownsActive = !data.vaultOwner || data.vaultOwner === data.user.email;
     if ((data.role || "") === "Admin") {
       headActions.append(textButton("pencil", "", () => this.plugin.renameActiveVault(), "sd-icon-btn"));
@@ -259,10 +266,71 @@ class SyncDeckView extends ItemView {
     }
     card.append(security);
 
+    // The active vault is encrypted but this device has no key for it. The vault
+    // switcher only ever opens a DIFFERENT vault, so this is the only way back.
+    const activeLocked = encrypted && !(data.vaultKeys && data.vaultKeys[data.vaultId]);
+    if (activeLocked) {
+      const locked = createElement("div", "sd-security-row is-locked");
+      locked.append(createElement("span", "", "This vault is encrypted and locked on this device."));
+      locked.append(textButton("unlock", "Unlock", () => this.plugin.unlockActiveVault(), "sd-primary-btn"));
+      card.append(locked);
+    }
+
+    // Also when the SERVER still holds a sealed copy: that is the only way back
+    // to Turn off / Change after a failed removal, and the only honest thing to
+    // show someone whose account has a vault password this device never set up.
+    if (encrypted || this.plugin.escrowIsConfirmed() || data.escrowDirty || data.escrowRemote) {
+      card.append(this.renderVaultPasswordRow());
+    }
+
     if (!isPro && data.billingEnabled) {
       card.append(textButton("sparkles", "Upgrade to Pro", () => this.plugin.openUpgradeModal(), "sd-upgrade-btn sd-block-btn"));
     }
     return card;
+  }
+
+  // Vault password: the thing that lets a NEW device unlock after signing in,
+  // instead of asking for the 52-character SDK1 recovery key.
+  renderVaultPasswordRow() {
+    const data = this.plugin.data;
+    const row = createElement("div", "sd-security-row is-password");
+    if (data.escrowAvailable === false) {
+      row.append(createElement("span", "", "This server does not offer vault passwords yet."));
+      // Still offer the way out when this device is stuck mid-save, or the row
+      // would be a dead end the moment the server switches the feature off.
+      if (data.escrowDirty || data.escrowRemote || this.plugin.escrowIsConfirmed()) {
+        row.append(textButton("x", "Turn off", () => this.plugin.disableVaultPassword(), "sd-ghost-btn sd-danger"));
+      }
+      return row;
+    }
+    // The "on" state is gated on THIS device's proof, never on what the server
+    // claims — otherwise a hostile server could tell someone who never set a
+    // password that they have one, and have them type it.
+    if (!this.plugin.escrowIsConfirmed()) {
+      if (data.escrowRemote) {
+        // The account has one; this device has not joined it. Both actions work
+        // without local proof: Change asks for the current password, Turn off
+        // just deletes the server copy.
+        row.append(createElement("span", "", "This account has a vault password that this device has not used yet."));
+        row.append(textButton("pencil", "Change", () => this.plugin.changeVaultPassword(), "sd-ghost-btn"));
+        row.append(textButton("x", "Turn off", () => this.plugin.disableVaultPassword(), "sd-ghost-btn sd-danger"));
+        return row;
+      }
+      row.append(createElement("span", "", "Set a vault password so signing in on a new device unlocks this vault."));
+      row.append(textButton("lock", "Set password", () => this.plugin.setUpVaultPassword(), "sd-primary-btn"));
+      return row;
+    }
+    if (data.escrowDirty) {
+      row.append(createElement("span", "", "A new key still needs saving under your vault password."));
+      row.append(textButton("refresh-cw", "Finish saving", () => this.plugin.finishEscrowUpdate(), "sd-primary-btn"));
+      // Always leave a way out of a stuck state.
+      row.append(textButton("x", "Turn off", () => this.plugin.disableVaultPassword(), "sd-ghost-btn sd-danger"));
+      return row;
+    }
+    row.append(createElement("span", "", "Vault password is on. A new device unlocks after you sign in."));
+    row.append(textButton("pencil", "Change", () => this.plugin.changeVaultPassword(), "sd-ghost-btn"));
+    row.append(textButton("x", "Turn off", () => this.plugin.disableVaultPassword(), "sd-ghost-btn sd-danger"));
+    return row;
   }
 
   renderStorage() {

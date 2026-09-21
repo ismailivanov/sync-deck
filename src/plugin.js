@@ -15,18 +15,27 @@ const { SyncDeckView } = require("./view");
 const { SyncDeckSettingTab } = require("./settings-tab");
 const { EditorPresence } = require("./editor-presence");
 const {
+  ESCROW_KDF,
+  ESCROW_MIN_PASSPHRASE_LENGTH,
   PROTOCOL_VERSION,
   VaultCrypto,
+  assertPassphraseStrength,
+  calibrateEscrowIterations,
+  deriveEscrowKey,
+  generateEscrowSalt,
   generateVaultKey,
   parseRecoveryCode,
   parseSecureInviteCode,
   recoveryCode,
   secureInviteCode,
+  suggestPassphrase,
+  unwrapVaultKey,
+  wrapVaultKey,
 } = require("./crypto");
 
 // Terms of Service. Bump this date when TERMS.md changes materially — users are
 // re-prompted to accept when their accepted version != the current one.
-const CURRENT_TERMS_VERSION = "2026-07-29.1";
+const CURRENT_TERMS_VERSION = "2026-09-22.1";
 const TERMS_URL = "https://github.com/ismailivanov/sync-deck/blob/main/TERMS.md";
 
 const REMOTE_POLL_INTERVAL_MS = 1200; // idle poll (nobody else on the open file)
@@ -70,6 +79,14 @@ async function sha256Hex(buffer) {
 
 function isVaultAccessError(error) {
   return error && error.status === 403 && /vault access denied/i.test(error.message || "");
+}
+
+// The active vault is end-to-end encrypted but this device has no key for it.
+// Raised locally by getVaultCrypto and remotely by the server's 409 on register.
+// Without this, every poll just marked the plugin "offline" and queued the same
+// failure forever, with nothing anywhere offering to unlock.
+function isVaultLockedError(error) {
+  return !!error && (error.code === "vault_key_required" || error.status === 409);
 }
 
 class InviteCodeModal extends Modal {
@@ -307,6 +324,103 @@ class TextPromptModal extends Modal {
   }
 }
 
+// Vault password entry. mode "set" asks twice and offers a generated suggestion;
+// mode "enter" asks once. Resolves the raw password, or null on cancel/close.
+// The password is never stored — only the key derived from it, in memory.
+class PassphraseModal extends Modal {
+  constructor(app, opts) {
+    super(app);
+    this.opts = opts || {};
+    this.resolve = null;
+  }
+
+  openAndWait() {
+    return new Promise((resolve) => { this.resolve = resolve; this.open(); });
+  }
+
+  finish(value) {
+    const resolve = this.resolve;
+    this.resolve = null;
+    this.close();
+    if (resolve) resolve(value);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    const setting = this.opts.mode === "set";
+    contentEl.empty();
+    contentEl.addClass("sd-prompt-modal");
+    contentEl.createEl("h2", { text: this.opts.title || (setting ? "Set a vault password" : "Vault password") });
+    if (this.opts.body) contentEl.createEl("p", { text: this.opts.body });
+
+    const first = contentEl.createEl("input", {
+      attr: { type: "password", placeholder: "Vault password", spellcheck: "false" },
+    });
+    first.addClass("sd-code-input");
+    const second = setting
+      ? contentEl.createEl("input", { attr: { type: "password", placeholder: "Repeat the password", spellcheck: "false" } })
+      : null;
+    if (second) second.addClass("sd-code-input");
+
+    const hint = contentEl.createEl("p", { cls: "sd-prompt-hint", text: "" });
+    const showError = (message) => { hint.textContent = message; hint.addClass("sd-prompt-error"); };
+
+    if (setting) {
+      const suggestRow = contentEl.createDiv({ cls: "sd-modal-actions sd-prompt-suggest" });
+      const suggest = suggestRow.createEl("button", { text: "Suggest a strong password" });
+      suggest.addEventListener("click", () => {
+        const value = suggestPassphrase(8);
+        first.value = value;
+        if (second) second.value = value;
+        first.type = "text";
+        if (second) second.type = "text";
+        hint.removeClass("sd-prompt-error");
+        hint.textContent = "Write this down before you continue — it is the only way in on a new device.";
+      });
+    }
+
+    const actions = contentEl.createDiv({ cls: "sd-modal-actions" });
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const ok = actions.createEl("button", { text: this.opts.confirmText || (setting ? "Save password" : "Unlock") });
+    ok.addClass("mod-cta");
+
+    const submit = () => {
+      const value = first.value;
+      if (!value) { first.focus(); return; }
+      if (setting) {
+        if (value.length < ESCROW_MIN_PASSPHRASE_LENGTH) {
+          showError(`Use at least ${ESCROW_MIN_PASSPHRASE_LENGTH} characters.`);
+          first.focus();
+          return;
+        }
+        if (second && second.value !== value) {
+          showError("The two passwords do not match.");
+          second.focus();
+          return;
+        }
+      }
+      this.finish(value);
+    };
+
+    cancel.addEventListener("click", () => this.finish(null));
+    ok.addEventListener("click", submit);
+    [first, second].forEach((input) => {
+      if (!input) return;
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") submit();
+        if (event.key === "Escape") this.finish(null);
+      });
+    });
+
+    window.setTimeout(() => first.focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (this.resolve) this.finish(null);
+  }
+}
+
 // Pick one of N choices. Resolves the chosen key, or null on cancel/close.
 class ChoiceModal extends Modal {
   constructor(app, opts) {
@@ -468,6 +582,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
 
   onunload() {
     this.unloaded = true;
+    // The vault password's derived key is memory-only and must not outlive the
+    // plugin instance.
+    this.setEscrowKey(null, null, false);
     if (this.autoSyncTimer) window.clearTimeout(this.autoSyncTimer);
     if (this.remotePollTimer) window.clearTimeout(this.remotePollTimer);
     if (this.editorPresence) this.editorPresence.stop();
@@ -533,6 +650,32 @@ module.exports = class SyncDeckPlugin extends Plugin {
     data.pendingEncryptionCleanup = data.pendingEncryptionCleanup && typeof data.pendingEncryptionCleanup === "object"
       ? data.pendingEncryptionCleanup
       : null;
+    // Vault password escrow. The password itself and the key derived from it are
+    // memory-only and NEVER written here — only the public KDF parameters, the
+    // server revision we last saw, and which vaults we have escrowed.
+    data.escrowEnabled = !!data.escrowEnabled;
+    data.escrowKdf = typeof data.escrowKdf === "string" ? data.escrowKdf : "";
+    data.escrowSalt = typeof data.escrowSalt === "string" ? data.escrowSalt : "";
+    data.escrowIterations = Number(data.escrowIterations) > 0 ? Number(data.escrowIterations) : 0;
+    data.escrowRev = Number(data.escrowRev) || 0;
+    data.escrowVaultIds = Array.isArray(data.escrowVaultIds) ? data.escrowVaultIds : [];
+    // A key was created/imported while the password was not unlocked in memory —
+    // the panel offers to finish saving it.
+    data.escrowDirty = !!data.escrowDirty;
+    // Tri-state, stored as a boolean: unknown/true means "try it". Only a 404
+    // from the server flips it false. Defaulting to false would mean a fresh
+    // device — the exact case this feature exists for — never even asks.
+    data.escrowAvailable = data.escrowAvailable !== false;
+    // Local proof the user set the vault password on THIS device (or typed one
+    // that actually opened a sealed record). Everything that seals keys is gated
+    // on it, so a server claiming "you have a password" can never make a user
+    // type one and have their keys sealed under it.
+    data.escrowConfirmedAt = typeof data.escrowConfirmedAt === "string" ? data.escrowConfirmedAt : "";
+    // What the SERVER last said it holds. Never a reason to seal anything.
+    data.escrowRemote = !!data.escrowRemote;
+    if (!data.escrowConfirmedAt) data.escrowEnabled = false;
+    data.escrowDeclinedAt = typeof data.escrowDeclinedAt === "string" ? data.escrowDeclinedAt : "";
+    data.lastVaultId = typeof data.lastVaultId === "string" ? data.lastVaultId : "";
     data.vaultStats = Object.assign(clone(DEFAULT_DATA.vaultStats), data.vaultStats || {});
     data.members = Array.isArray(data.members)
       ? data.members.filter((member) => member && !DEMO_MEMBER_EMAILS.has(member.email))
@@ -546,6 +689,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
       const vaultName = this.app && this.app.vault && this.app.vault.getName ? this.app.vault.getName() : "";
       if (vaultName && (!data.workspace || data.workspace === "Aircraft Team")) data.workspace = vaultName;
     }
+    // Computed AFTER vaultId is settled: the active vault is encrypted and this
+    // device holds no key for it. Derived from the key store every load, so a
+    // restored data.json can never leave a stale lock behind.
+    data.vaultLocked = Number(data.vaultEncryptionVersions[data.vaultId]) === PROTOCOL_VERSION
+      && !data.vaultKeys[data.vaultId];
     data.syncQueue = this.compactQueue(Array.isArray(data.syncQueue) ? data.syncQueue : []);
     data.recentFiles = Array.isArray(data.recentFiles) ? data.recentFiles.slice(0, 20) : [];
     data.remoteKnownPaths = Array.isArray(data.remoteKnownPaths) ? data.remoteKnownPaths : [];
@@ -641,7 +789,13 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.vaultCryptoCache = this.vaultCryptoCache || new Map();
     const cacheKey = `${vaultId}:${encodedKey}`;
     if (!this.vaultCryptoCache.has(cacheKey)) {
-      this.vaultCryptoCache.set(cacheKey, VaultCrypto.create(vaultId, encodedKey));
+      // Evict a rejected promise: caching it would make one transient Web Crypto
+      // failure poison this key for the rest of the session.
+      const pending = VaultCrypto.create(vaultId, encodedKey);
+      pending.catch(() => {
+        if (this.vaultCryptoCache.get(cacheKey) === pending) this.vaultCryptoCache.delete(cacheKey);
+      });
+      this.vaultCryptoCache.set(cacheKey, pending);
     }
     return this.vaultCryptoCache.get(cacheKey);
   }
@@ -651,10 +805,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.vaultEncryptionVersions[vaultId] = PROTOCOL_VERSION;
     const cryptoContext = await this.getVaultCrypto(vaultId);
     this.data.vaultKeyChecks[vaultId] = await cryptoContext.keyCheck();
+    if (vaultId === this.data.vaultId) this.data.vaultLocked = false;
+    await this.queueEscrowUpdate();
     return cryptoContext;
   }
 
-  async importVaultKey(vaultId, input, expectedCheck = "") {
+  async importVaultKey(vaultId, input, expectedCheck = "", options = {}) {
     const key = parseRecoveryCode(input);
     const cryptoContext = await VaultCrypto.create(vaultId, key);
     const check = await cryptoContext.keyCheck();
@@ -662,9 +818,12 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.vaultKeys[vaultId] = key;
     this.data.vaultEncryptionVersions[vaultId] = PROTOCOL_VERSION;
     this.data.vaultKeyChecks[vaultId] = expectedCheck || check;
+    if (vaultId === this.data.vaultId) this.data.vaultLocked = false;
     this.vaultCryptoCache = this.vaultCryptoCache || new Map();
     this.vaultCryptoCache.set(`${vaultId}:${key}`, Promise.resolve(cryptoContext));
     await this.savePluginData();
+    // A key that just came OUT of the escrow bundle is already in it.
+    if (!options.escrowed) await this.queueEscrowUpdate();
     return cryptoContext;
   }
 
@@ -679,24 +838,756 @@ module.exports = class SyncDeckPlugin extends Plugin {
     return this.importVaultKey(vault.vaultId, value, vault.keyCheck || this.data.vaultKeyChecks[vault.vaultId] || "");
   }
 
+  // Order: the key already on this device, then the account's vault password,
+  // then the SDK1 recovery key as the break-glass path.
   async ensureVaultKeyFor(vault) {
     if (!vault || Number(vault.encryptionVersion) !== PROTOCOL_VERSION) return null;
+    const expected = vault.keyCheck || this.data.vaultKeyChecks[vault.vaultId] || "";
     const existing = await this.getVaultCrypto(vault.vaultId, false);
-    if (existing) {
-      const expected = vault.keyCheck || this.data.vaultKeyChecks[vault.vaultId] || "";
-      if (expected && await existing.keyCheck() !== expected) {
-        delete this.data.vaultKeys[vault.vaultId];
-        if (this.vaultCryptoCache) {
-          for (const key of this.vaultCryptoCache.keys()) {
-            if (key.startsWith(`${vault.vaultId}:`)) this.vaultCryptoCache.delete(key);
-          }
+    if (existing && (!expected || await existing.keyCheck() === expected)) return existing;
+    // A mismatch used to delete the local key here, BEFORE prompting — so
+    // cancelling the prompt destroyed the only copy on the device. importVaultKey
+    // already verifies expectedCheck before overwriting, so deleting is both
+    // unnecessary and destructive. Leave it alone.
+    const viaPassword = await this.unlockFromEscrow(vault.vaultId, expected, {
+      title: `Unlock ${vault.workspace || "this vault"}`,
+    });
+    if (viaPassword) return viaPassword;
+    return this.promptForVaultKey(vault);
+  }
+
+  // ---- Vault password ------------------------------------------------------
+  // A vault password lets a NEW device unlock this account's vaults after signing
+  // in, instead of pasting a 52-character SDK1 recovery key. The wrapping happens
+  // here: the server only ever holds the sealed envelope. It never sees the
+  // password, and never sees a vault key. SDK1 remains the break-glass path.
+
+  escrowParams() {
+    if (!this.data.escrowKdf || !this.data.escrowSalt || !this.data.escrowIterations) return null;
+    return { kdf: this.data.escrowKdf, iterations: this.data.escrowIterations, salt: this.data.escrowSalt };
+  }
+
+  escrowParamsSignature(params) {
+    return params ? `${params.kdf}:${params.iterations}:${params.salt}` : "";
+  }
+
+  // Record what the SERVER says, without believing any of it. The server is the
+  // untrusted party in this threat model: if its KDF parameters were adopted as
+  // this device's own, a hostile server could pin every account to one salt and
+  // the minimum iteration count, and the next re-seal would use them. Parameters
+  // are only promoted by escrowParamsProven(), after they have actually opened a
+  // sealed record — which proves the user's password produced them.
+  rememberEscrowBundle(bundle) {
+    if (!bundle) {
+      this.data.escrowRemote = false;
+      return;
+    }
+    this.data.escrowRemote = true;
+    this.data.escrowRev = Number(bundle.rev) || 0;
+    this.data.escrowVaultIds = Object.keys(bundle.entries || {});
+  }
+
+  // A derived key opened a real sealed record under these parameters, so they
+  // came from the user's own password rather than from the server's say-so.
+  async escrowParamsProven(params) {
+    if (!params) return;
+    const signature = this.escrowParamsSignature(params);
+    if (this.escrowParamsSignature(this.escrowParams()) === signature) return;
+    this.data.escrowKdf = params.kdf;
+    this.data.escrowSalt = params.salt;
+    this.data.escrowIterations = Number(params.iterations) || 0;
+    this.data.escrowEnabled = true;
+    if (!this.data.escrowConfirmedAt) this.data.escrowConfirmedAt = new Date().toISOString();
+    await this.savePluginData();
+  }
+
+  bundleParams(bundle) {
+    if (!bundle) return null;
+    return { kdf: bundle.kdf, iterations: Number(bundle.iterations), salt: bundle.salt };
+  }
+
+  // Everything that seals keys is gated on this: proof that THIS device saw the
+  // vault password work. Without it, a server claiming "you have a password"
+  // could make a user type one and have their keys sealed under it.
+  escrowIsConfirmed() {
+    return !!this.data.escrowConfirmedAt && !!this.escrowParams();
+  }
+
+  async forgetEscrowLocally() {
+    this.data.escrowEnabled = false;
+    this.data.escrowConfirmedAt = "";
+    this.data.escrowKdf = "";
+    this.data.escrowSalt = "";
+    this.data.escrowIterations = 0;
+    this.data.escrowRev = 0;
+    this.data.escrowVaultIds = [];
+    this.data.escrowDirty = false;
+    this.setEscrowKey(null, null, false);
+    // Persist: leaving this in memory only meant a restart brought the stale
+    // parameters — and the dead end they cause — straight back.
+    await this.savePluginData();
+  }
+
+  // Throws on network failure so callers can tell "offline" from "no password
+  // set". Returns null when the account has no bundle, or when the server has
+  // escrow switched off (404).
+  async fetchEscrowBundle() {
+    let result;
+    try {
+      result = await this.api("/me/escrow");
+    } catch (error) {
+      if (error.status === 404) {
+        this.data.escrowAvailable = false;
+        return null;
+      }
+      throw error;
+    }
+    this.data.escrowAvailable = true;
+    const bundle = result && result.escrow ? result.escrow : null;
+    this.rememberEscrowBundle(bundle);
+    // Deliberately NO side effect on the local state here. Clearing it from a
+    // plain read meant a first set-up — which reads before its first write —
+    // wiped the parameters the user had just chosen. The callers that really
+    // mean "the password is gone" clear it themselves.
+    return bundle;
+  }
+
+  // Derive (and cache in memory only) the key that wraps this account's vault
+  // keys. Returns null if the user cancels the prompt.
+  async ensureEscrowKey(bundle, options = {}) {
+    const params = bundle
+      ? { kdf: bundle.kdf, iterations: Number(bundle.iterations), salt: bundle.salt }
+      : this.escrowParams();
+    if (!params) return null;
+    const signature = this.escrowParamsSignature(params);
+    if (this.escrowKey && this.escrowKeySignature === signature) {
+      // A key cached while the bundle had no records is still unproven. Once
+      // there IS something to check it against, check it — otherwise it would
+      // stay unproven for the whole session and silently refuse every write.
+      if (this.escrowKeyProven === false && bundle && Object.keys(bundle.entries || {}).length) {
+        if (await this.escrowKeyOpensBundle(this.escrowKey, bundle, params)) {
+          this.escrowKeyProven = true;
+          await this.escrowParamsProven(params);
+        } else {
+          this.setEscrowKey(null, null, false);
         }
-        await this.savePluginData();
-      } else {
-        return existing;
+      }
+      if (this.escrowKey) return this.escrowKey;
+    }
+
+    if (options.silent) return null;
+    // Local-only throttle. A real attacker already holds the envelope, so this is
+    // about typo fatigue, not about slowing anyone down.
+    const now = Date.now();
+    if (this.escrowAttemptBlockedUntil && now < this.escrowAttemptBlockedUntil) {
+      throw new Error("Too many attempts. Wait a minute and try again.");
+    }
+
+    const passphrase = await new PassphraseModal(this.app, {
+      mode: "enter",
+      title: options.title || "Vault password",
+      body: options.body
+        || "Enter the vault password for your Sync Deck account. It unlocks every encrypted vault you have, and is never sent to the server.",
+      confirmText: "Unlock",
+    }).openAndWait();
+    if (!passphrase) return null;
+
+    return this.acceptEscrowKey(await deriveEscrowKey(passphrase, params), bundle, params);
+  }
+
+  // Prove a freshly derived key before trusting it. Without this, a mistyped
+  // password was cached and then used to RE-SEAL every vault key — after which
+  // the real password opened nothing.
+  //
+  // A bundle with no records cannot prove anything, and that is a reachable
+  // state (every record can be dropped as unreachable, and a hostile server can
+  // simply serve an empty one). So an unprovable password is accepted for this
+  // call but marked UNPROVEN, and nothing that seals keys will use it.
+  async acceptEscrowKey(key, bundle, params) {
+    const hasRecords = !!(bundle && bundle.entries && Object.keys(bundle.entries).length);
+    if (hasRecords) {
+      const opened = await this.escrowKeyOpensBundle(key, bundle, params);
+      if (!opened) {
+        this.setEscrowKey(null, null, false);
+        this.noteEscrowAttempt(true);
+        new Notice("That vault password is not the one this account uses.");
+        return null;
+      }
+      this.noteEscrowAttempt(false);
+      await this.escrowParamsProven(params);
+    }
+    this.setEscrowKey(key, params, hasRecords);
+    return key;
+  }
+
+  // The in-memory key, its parameter signature and whether it has been proven
+  // always move together. They used to be assigned separately, which left a
+  // stale "unproven" flag rejecting every write for the rest of the session.
+  setEscrowKey(key, params, proven) {
+    this.escrowKey = key;
+    this.escrowKeySignature = key ? this.escrowParamsSignature(params) : "";
+    this.escrowKeyProven = key ? !!proven : undefined;
+  }
+
+  // Does this derived key actually open at least one sealed record?
+  async escrowKeyOpensBundle(key, bundle, params) {
+    for (const vaultId of Object.keys(bundle.entries || {})) {
+      try {
+        await unwrapVaultKey(key, this.data.user.email, vaultId, bundle.entries[vaultId], params);
+        return true;
+      } catch (error) {
+        // Try the next record: one damaged entry must not condemn the password.
       }
     }
-    return this.promptForVaultKey(vault);
+    return false;
+  }
+
+  noteEscrowAttempt(failed) {
+    if (!failed) {
+      this.escrowFailedAttempts = 0;
+      this.escrowAttemptBlockedUntil = 0;
+      return;
+    }
+    this.escrowFailedAttempts = (this.escrowFailedAttempts || 0) + 1;
+    if (this.escrowFailedAttempts >= 5) {
+      this.escrowFailedAttempts = 0;
+      this.escrowAttemptBlockedUntil = Date.now() + 60000;
+    }
+  }
+
+  // Try to unlock one vault from the account's escrow bundle. Returns a
+  // VaultCrypto on success and null on every "not available" path — a missing
+  // bundle, a missing entry, being offline, or the user cancelling. It NEVER
+  // deletes a local key, so a failure here always falls through to SDK1 intact.
+  async unlockFromEscrow(vaultId, expectedCheck = "", options = {}) {
+    if (!this.data.signedIn || !this.data.authToken) return null;
+    if (this.data.escrowAvailable === false && !this.data.escrowEnabled) return null;
+    let bundle;
+    try {
+      bundle = await this.fetchEscrowBundle();
+    } catch (error) {
+      return null; // offline / transient: fall through to the recovery key
+    }
+    if (!bundle || !bundle.entries || !bundle.entries[vaultId]) return null;
+
+    const key = await this.ensureEscrowKey(bundle, options);
+    if (!key) return null;
+
+    const params = { kdf: bundle.kdf, iterations: Number(bundle.iterations), salt: bundle.salt };
+    let unwrapped;
+    try {
+      unwrapped = await unwrapVaultKey(key, this.data.user.email, vaultId, bundle.entries[vaultId], params);
+    } catch (error) {
+      // Wrong password (or a damaged record). Drop the cached key so the next
+      // attempt asks again, and let the caller fall back to the recovery key.
+      this.setEscrowKey(null, null, false);
+      this.noteEscrowAttempt(true);
+      new Notice("That vault password did not unlock this vault.");
+      return null;
+    }
+    this.noteEscrowAttempt(false);
+    await this.escrowParamsProven(params);
+
+    const expected = expectedCheck || unwrapped.keyCheck || "";
+    let cryptoContext;
+    try {
+      cryptoContext = await this.importVaultKey(vaultId, recoveryCode(unwrapped.key), expected, { escrowed: true });
+    } catch (error) {
+      // The stored key no longer matches this vault (the owner rotated it).
+      new Notice("Your vault password is correct, but this vault's key has been rotated. Ask the owner for a new invite.");
+      return null;
+    }
+    // Opportunistically unlock the account's other vaults from the same bundle.
+    await this.unlockAllFromEscrow(bundle, key, vaultId);
+    return cryptoContext;
+  }
+
+  // Import every other entry the bundle carries, so switching to a second vault
+  // later never asks again. Best-effort: a bad entry is skipped, not fatal.
+  async unlockAllFromEscrow(bundle, key, skipVaultId = "") {
+    if (!bundle || !bundle.entries || !key) return 0;
+    const params = this.bundleParams(bundle);
+    let opened = 0;
+    let changed = false;
+    for (const vaultId of Object.keys(bundle.entries)) {
+      if (vaultId === skipVaultId) continue;
+      if (this.data.vaultKeys[vaultId]) continue;
+      try {
+        const unwrapped = await unwrapVaultKey(key, this.data.user.email, vaultId, bundle.entries[vaultId], params);
+        this.data.vaultKeys[vaultId] = unwrapped.key;
+        this.data.vaultEncryptionVersions[vaultId] = PROTOCOL_VERSION;
+        if (unwrapped.keyCheck) this.data.vaultKeyChecks[vaultId] = unwrapped.keyCheck;
+        if (vaultId === this.data.vaultId) this.data.vaultLocked = false;
+        opened += 1;
+        changed = true;
+      } catch (error) {
+        // Skip an entry we cannot open; the rest of the bundle still works.
+      }
+    }
+    if (opened) await this.escrowParamsProven(params);
+    if (changed) await this.savePluginData();
+    return opened;
+  }
+
+  // Seal every vault key this device holds and store the bundle. Returns true
+  // when the server copy is up to date.
+  async publishEscrowBundle(options = {}) {
+    // Sealing is gated on local proof that the user really set this password on
+    // this device. options.setup covers the very first write, where there is
+    // nothing yet to prove against.
+    if (!options.setup && !this.escrowIsConfirmed()) return false;
+    if (!this.data.signedIn || !this.data.authToken) return false;
+    const params = options.params || this.escrowParams();
+    if (!params) return false;
+    const key = options.key || await this.ensureEscrowKey(null, { silent: !options.allowPrompt });
+    if (!key) {
+      this.data.escrowDirty = true;
+      await this.savePluginData();
+      return false;
+    }
+    // A key derived under DIFFERENT parameters must never seal under these ones:
+    // the result would be a bundle nobody's password can open.
+    if (options.key && this.escrowKeySignature
+      && this.escrowKeySignature !== this.escrowParamsSignature(params)) {
+      this.data.escrowDirty = true;
+      await this.savePluginData();
+      return false;
+    }
+    // Outside a deliberate set-up/change (where the user typed the password
+    // twice), only a key that has actually opened a record may seal anything.
+    if (!options.setup && this.escrowKeyProven === false) {
+      this.data.escrowDirty = true;
+      await this.savePluginData();
+      if (!options.silent) {
+        new Notice("Your sealed keys could not be checked against that password, so nothing was saved. Use Change password to set a new one.");
+      }
+      return false;
+    }
+
+    // Always start from what the server holds. Rebuilding the bundle from this
+    // device's keys alone silently deleted records for vaults whose key lives
+    // only on another device — and the routine path (queueEscrowUpdate) carries
+    // a current ifRev, so the server's conflict check would not catch it either.
+    let carry = options.carry;
+    if (carry === undefined) {
+      // Read this BEFORE the fetch: fetchEscrowBundle sets escrowRemote from the
+      // answer, so checking it afterwards could never tell us what we knew.
+      const knewBundle = Number(this.data.escrowRev) > 0 || this.data.escrowRemote;
+      let remote = null;
+      try {
+        remote = await this.fetchEscrowBundle();
+      } catch (error) {
+        this.data.escrowDirty = true;
+        await this.savePluginData();
+        return false; // offline: never write a bundle built from a partial view
+      }
+      if (!remote && this.data.escrowAvailable === false) {
+        // The server has the whole feature switched off. That is not the user
+        // revoking their password, so keep the local state and just hold.
+        this.data.escrowDirty = true;
+        await this.savePluginData();
+        return false;
+      }
+      if (remote) {
+        const remoteParams = this.bundleParams(remote);
+        if (this.escrowParamsSignature(remoteParams) !== this.escrowParamsSignature(params)) {
+          // The password changed elsewhere; our key cannot seal into their bundle.
+          this.setEscrowKey(null, null, false);
+          this.data.escrowDirty = true;
+          await this.savePluginData();
+          if (!options.silent) new Notice("Your vault password was changed on another device. Enter the new one to finish saving.");
+          return false;
+        }
+        carry = remote.entries || {};
+      } else if (knewBundle) {
+        // We have seen a bundle before and now there is none: the user turned the
+        // vault password OFF on another device. Writing a "clean create" here
+        // would silently resurrect it — re-sealing every key under a password
+        // they had just revoked.
+        await this.forgetEscrowLocally();
+        this.data.escrowRemote = false;
+        await this.savePluginData();
+        this.refreshViews();
+        if (!options.silent) new Notice("The vault password was turned off on another device.");
+        return false;
+      } else {
+        carry = {};
+      }
+    }
+
+    // Only vaults this account can still reach. A key left behind for a vault we
+    // were removed from would make the server refuse every future write, and the
+    // panel would sit on "finish saving" forever.
+    const live = new Set((this.data.vaultList || []).map((vault) => vault.vaultId));
+    const reachable = (vaultId) => vaultId === this.data.vaultId
+      || !live.size
+      || live.has(vaultId)
+      || !this.data.escrowVaultIds.includes(vaultId);
+    const ids = Object.keys(this.data.vaultKeys)
+      .filter((vaultId) => this.data.vaultKeys[vaultId] && reachable(vaultId))
+      .sort((a, b) => {
+        const rank = (id) => (id === this.data.vaultId ? 0 : live.has(id) ? 1 : 2);
+        return rank(a) - rank(b);
+      });
+
+    const entries = {};
+    for (const vaultId of ids) {
+      entries[vaultId] = await wrapVaultKey(
+        key,
+        this.data.user.email,
+        vaultId,
+        this.data.vaultKeys[vaultId],
+        this.data.vaultKeyChecks[vaultId] || "",
+        params
+      );
+    }
+    // Carry forward records for vaults this device has no key for. Rebuilding the
+    // bundle from local keys alone silently deleted another device's entries.
+    const merged = this.mergeEscrowEntries(carry, entries);
+
+    if (!Object.keys(merged).length) {
+      // A bundle with no records cannot prove a password, which is what let a
+      // mistyped one re-seal everything. There is never a reason to store one.
+      this.data.escrowDirty = true;
+      await this.savePluginData();
+      if (!options.silent) new Notice("There are no vault keys on this device to protect yet.");
+      return false;
+    }
+
+    const payload = {
+      v: 1,
+      kdf: params.kdf,
+      iterations: params.iterations,
+      salt: params.salt,
+      ifRev: Number(this.data.escrowRev) || 0,
+      entries: merged,
+    };
+
+    try {
+      const result = await this.api("/me/escrow", { method: "POST", body: payload });
+      if (result && result.stored === false) {
+        // Every record named a vault this account can no longer reach, so the
+        // server kept nothing. Reporting success here told people their keys
+        // were protected when nothing had been stored at all.
+        this.data.escrowDirty = true;
+        await this.savePluginData();
+        if (!options.silent) {
+          new Notice("None of the vault keys on this device could be protected — you may have been removed from those vaults.");
+        }
+        return false;
+      }
+      this.data.escrowRev = Number(result.rev) || 0;
+      this.data.escrowVaultIds = Object.keys(payload.entries);
+      this.data.escrowDirty = false;
+      this.data.escrowRemote = true;
+      if (!this.data.escrowConfirmedAt) this.data.escrowConfirmedAt = new Date().toISOString();
+      await this.savePluginData();
+      return true;
+    } catch (error) {
+      if (error.status === 409) {
+        const remote = error.body && error.body.escrow;
+        if (!remote) {
+          // Deleted on another device. Release this device instead of retrying:
+          // a "clean create" would put the revoked password back in force.
+          await this.forgetEscrowLocally();
+          this.data.escrowRemote = false;
+          await this.savePluginData();
+          this.refreshViews();
+          if (!options.silent) new Notice("The vault password was turned off on another device.");
+          return false;
+        }
+        const sameParams = remote.kdf === params.kdf
+          && Number(remote.iterations) === Number(params.iterations)
+          && remote.salt === params.salt;
+        if (!sameParams) {
+          // Another device changed the password. Our key cannot seal into their
+          // bundle; keep ours local and ask the user to re-enter.
+          this.rememberEscrowBundle(remote);
+          this.setEscrowKey(null, null, false);
+          this.data.escrowDirty = true;
+          await this.savePluginData();
+          if (!options.silent) new Notice("Your vault password was changed on another device. Enter the new one to finish saving.");
+          return false;
+        }
+        // Same password, concurrent write: keep every entry, ours winning.
+        payload.entries = this.mergeEscrowEntries(
+          Object.assign({}, carry, remote.entries || {}),
+          entries
+        );
+        payload.ifRev = Number(remote.rev) || 0;
+        try {
+          const retried = await this.api("/me/escrow", { method: "POST", body: payload });
+          this.data.escrowRev = Number(retried.rev) || 0;
+          this.data.escrowVaultIds = Object.keys(payload.entries);
+          this.data.escrowDirty = false;
+          await this.savePluginData();
+          return true;
+        } catch (retryError) {
+          this.data.escrowDirty = true;
+          await this.savePluginData();
+          return false;
+        }
+      }
+      if (error.status === 404) this.data.escrowAvailable = false;
+      this.data.escrowDirty = true;
+      await this.savePluginData();
+      if (!options.silent) new Notice(`Could not save the vault password: ${error.message}`);
+      return false;
+    }
+  }
+
+  // Remote records first, this device's sealed keys on top, then the server's
+  // 64-entry cap applied to the RESULT — a merge that overflows would otherwise
+  // be rejected forever. The active vault is always kept.
+  mergeEscrowEntries(remoteEntries, localEntries) {
+    const combined = Object.assign({}, remoteEntries || {}, localEntries || {});
+    const ids = Object.keys(combined);
+    if (ids.length <= 64) return combined;
+    const mine = new Set(Object.keys(localEntries || {}));
+    const live = new Set((this.data.vaultList || []).map((vault) => vault.vaultId));
+    const rank = (id) => (id === this.data.vaultId ? 0 : mine.has(id) ? 1 : live.has(id) ? 2 : 3);
+    const kept = {};
+    for (const id of ids.sort((a, b) => rank(a) - rank(b)).slice(0, 64)) kept[id] = combined[id];
+    return kept;
+  }
+
+  // A key was created or imported. Seal it immediately when the password is
+  // already unlocked in memory; otherwise flag it and let the panel finish later.
+  async queueEscrowUpdate() {
+    if (!this.escrowIsConfirmed()) return;
+    if (!this.escrowKey) {
+      // Persist it: a flag only held in memory was lost on restart, and the
+      // panel then never offered to finish saving the key.
+      this.data.escrowDirty = true;
+      await this.savePluginData();
+      return;
+    }
+    await this.publishEscrowBundle({ silent: true, key: this.escrowKey });
+  }
+
+  // Ask once, right after a vault is first encrypted, whether to set a vault
+  // password. Declining is remembered so this never nags.
+  async offerVaultPassword() {
+    if (!this.data.signedIn || this.escrowIsConfirmed() || this.data.escrowDeclinedAt) return false;
+    if (this.data.escrowAvailable === false) return false;
+    const choice = await new ChoiceModal(this.app, {
+      title: "Unlock on your other devices?",
+      body: "A vault password lets you sign in on another device and unlock this vault without pasting the SDK1 recovery key. Your keys are sealed with it here; the server never sees the password. Keep the recovery key either way.",
+      choices: [
+        { key: "set", label: "Set a vault password", cta: true },
+        { key: "skip", label: "Recovery key only" },
+      ],
+    }).openAndWait();
+    if (choice !== "set") {
+      this.data.escrowDeclinedAt = new Date().toISOString();
+      await this.savePluginData();
+      return false;
+    }
+    return this.setUpVaultPassword();
+  }
+
+  async setUpVaultPassword() {
+    if (!this.data.signedIn) { new Notice("Sign in first."); return false; }
+    // With no key to seal, this would store an empty bundle — which then blocks
+    // the device that DOES hold the keys from ever registering them.
+    const holdsAKey = Object.keys(this.data.vaultKeys).some((id) => this.data.vaultKeys[id]);
+    if (!holdsAKey) {
+      new Notice("Unlock an encrypted vault on this device first, then set a vault password.");
+      return false;
+    }
+    try {
+      // Never overwrite a bundle we have not seen — another device may own it.
+      const existing = await this.fetchEscrowBundle();
+      if (existing) {
+        new Notice("This account already has a vault password. Use Change instead.");
+        return false;
+      }
+      if (this.data.escrowAvailable === false) {
+        new Notice("This Sync Deck server does not offer vault passwords yet.");
+        return false;
+      }
+    } catch (error) {
+      new Notice("Could not reach the server. Try again when you are online.");
+      return false;
+    }
+
+    const passphrase = await new PassphraseModal(this.app, {
+      mode: "set",
+      title: "Set a vault password",
+      body: "This password unlocks your encrypted vaults on a new device after you sign in. It is used on this device only — the server stores your keys sealed with it and never sees the password itself. If you forget it, your SDK1 recovery key is the only way back in.",
+      confirmText: "Save password",
+    }).openAndWait();
+    if (!passphrase) return false;
+
+    try {
+      assertPassphraseStrength(passphrase);
+      const iterations = await calibrateEscrowIterations(400);
+      const params = { kdf: ESCROW_KDF, iterations, salt: generateEscrowSalt() };
+      const key = await deriveEscrowKey(passphrase, params);
+      this.data.escrowEnabled = true;
+      this.data.escrowKdf = params.kdf;
+      this.data.escrowIterations = params.iterations;
+      this.data.escrowSalt = params.salt;
+      this.data.escrowRev = 0;
+      this.data.escrowConfirmedAt = new Date().toISOString();
+      this.setEscrowKey(key, params, true);
+      const saved = await this.publishEscrowBundle({ params, key, carry: {}, setup: true });
+      if (!saved) {
+        await this.forgetEscrowLocally();
+        return false;
+      }
+      new Notice("Vault password saved. Signing in on another device now unlocks your vaults.");
+      this.refreshViews();
+      return true;
+    } catch (error) {
+      new Notice(error.message);
+      return false;
+    }
+  }
+
+  async changeVaultPassword() {
+    if (!this.data.signedIn) { new Notice("Sign in first."); return false; }
+    let bundle;
+    try {
+      bundle = await this.fetchEscrowBundle();
+    } catch (error) {
+      new Notice("Could not reach the server. Try again when you are online.");
+      return false;
+    }
+    if (!bundle) return this.setUpVaultPassword();
+
+    // Unlock with the current password first, so every entry — including vaults
+    // this device has no local key for — survives the re-wrap.
+    const currentKey = await this.ensureEscrowKey(bundle, {
+      title: "Current vault password",
+      body: "Enter your current vault password before choosing a new one.",
+    });
+    if (!currentKey) return false;
+    // Carry every record forward, including vaults this device has no key for.
+    await this.unlockAllFromEscrow(bundle, currentKey);
+    const carried = await this.resealableEntries(bundle, currentKey);
+    if (Object.keys(bundle.entries || {}).length && !Object.keys(carried).length) {
+      new Notice("That password did not open your sealed keys, so nothing was changed.");
+      return false;
+    }
+
+    const passphrase = await new PassphraseModal(this.app, {
+      mode: "set",
+      title: "New vault password",
+      body: "Every device that unlocks with the old password will ask for the new one.",
+      confirmText: "Change password",
+    }).openAndWait();
+    if (!passphrase) return false;
+
+    try {
+      assertPassphraseStrength(passphrase);
+      const iterations = await calibrateEscrowIterations(400);
+      const params = { kdf: ESCROW_KDF, iterations, salt: generateEscrowSalt() };
+      const key = await deriveEscrowKey(passphrase, params);
+      // Re-seal under the NEW parameters the records we just opened, so a vault
+      // whose key lives only on another device is not dropped from the bundle.
+      const carry = {};
+      for (const vaultId of Object.keys(carried)) {
+        carry[vaultId] = await wrapVaultKey(
+          key, this.data.user.email, vaultId, carried[vaultId].key, carried[vaultId].keyCheck, params
+        );
+      }
+      this.data.escrowKdf = params.kdf;
+      this.data.escrowIterations = params.iterations;
+      this.data.escrowSalt = params.salt;
+      this.data.escrowConfirmedAt = this.data.escrowConfirmedAt || new Date().toISOString();
+      this.setEscrowKey(key, params, true);
+      const saved = await this.publishEscrowBundle({ params, key, carry, setup: true });
+      if (saved) new Notice("Vault password changed.");
+      this.refreshViews();
+      return saved;
+    } catch (error) {
+      new Notice(error.message);
+      return false;
+    }
+  }
+
+  async disableVaultPassword() {
+    const confirmed = await new ConfirmModal(this.app, {
+      title: "Turn off the vault password?",
+      body: "Your keys stay on this device and nothing is re-encrypted, but a new device will need the SDK1 recovery key again. Make sure you still have it.",
+      confirmText: "Turn it off",
+      danger: true,
+    }).openAndWait();
+    if (!confirmed) return false;
+    let serverCleared = true;
+    try {
+      await this.api("/me/escrow/delete", { method: "POST" });
+    } catch (error) {
+      // 404 means the server has no escrow at all, so there is nothing to delete.
+      // Anything else (offline, a 5xx) must still let this device out of the
+      // feature — otherwise a stuck "finish saving" state has no exit.
+      if (error.status !== 404) serverCleared = false;
+    }
+    await this.forgetEscrowLocally();
+    this.data.escrowRemote = !serverCleared;
+    await this.savePluginData();
+    this.refreshViews();
+    new Notice(serverCleared
+      ? "Vault password turned off."
+      : "Turned off on this device. The server copy could not be reached — turn it off again when you are online to remove it.");
+    return true;
+  }
+
+  // Panel action for the "finish saving your vault password" state.
+  async finishEscrowUpdate() {
+    if (!this.escrowIsConfirmed()) return false;
+    let bundle;
+    try {
+      bundle = await this.fetchEscrowBundle();
+    } catch (error) {
+      new Notice("Could not reach the server. Try again when you are online.");
+      return false;
+    }
+    if (!bundle) {
+      // Nothing to re-seal into, so the local parameters are stale: drop them
+      // rather than prompting for a password no record can check.
+      await this.forgetEscrowLocally();
+      this.refreshViews();
+      new Notice(this.data.escrowAvailable === false
+        ? "This Sync Deck server no longer offers vault passwords."
+        : "The vault password was turned off on another device.");
+      return false;
+    }
+    if (!Object.keys(bundle.entries || {}).length) {
+      // With no record to check a password against, a typo here would re-seal
+      // every key under it and lock the real password out.
+      this.refreshViews();
+      new Notice("Your sealed keys are no longer on the server. Use Change password to set one up again.");
+      return false;
+    }
+    const key = await this.ensureEscrowKey(bundle);
+    if (!key) return false;
+    // Import what the bundle holds before re-sealing, so entries for vaults this
+    // device has no key for survive the write.
+    await this.unlockAllFromEscrow(bundle, key);
+    const carry = bundle.entries || {};
+    const saved = await this.publishEscrowBundle({ key, carry });
+    new Notice(saved ? "Vault password is up to date." : "Could not finish saving the vault password.");
+    this.refreshViews();
+    return saved;
+  }
+
+  // Open every record we can with this key, returning the raw material so the
+  // caller can re-seal it under new parameters.
+  async resealableEntries(bundle, key) {
+    const out = {};
+    if (!bundle || !bundle.entries || !key) return out;
+    const params = this.bundleParams(bundle);
+    for (const vaultId of Object.keys(bundle.entries)) {
+      try {
+        const unwrapped = await unwrapVaultKey(key, this.data.user.email, vaultId, bundle.entries[vaultId], params);
+        out[vaultId] = { key: unwrapped.key, keyCheck: unwrapped.keyCheck || "" };
+      } catch (error) {
+        // Not ours to re-seal; publishEscrowBundle carries it forward untouched.
+      }
+    }
+    return out;
   }
 
   async decryptManifest(manifest) {
@@ -1276,6 +2167,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       new Notice(choice === "add"
         ? `Created "${name}" with E2EE. ${recoveryMessage}; sync is on.`
         : `Created "${name}" empty with E2EE. ${recoveryMessage}; sync is on.`);
+      await this.offerVaultPassword();
     } catch (error) {
       new Notice(`Could not create the vault: ${error.message}`);
     } finally {
@@ -1426,18 +2318,21 @@ module.exports = class SyncDeckPlugin extends Plugin {
   }
 
   // The vaults this user can access (owned + joined), for the switchable list.
+  // Returns true only when the list actually came from the server. data.vaultList
+  // is persisted, so a caller that acts on it (sign-in adoption) must know the
+  // difference between "fetched" and "whatever was left from last time".
   async fetchVaultList() {
-    if (!this.data.signedIn || !this.data.authToken) return;
+    if (!this.data.signedIn || !this.data.authToken) return false;
     try {
       const result = await this.api("/vaults");
-      if (Array.isArray(result.vaults)) {
-        this.data.vaultList = result.vaults;
-        result.vaults.forEach((vault) => this.rememberEncryptionInfo(vault.vaultId, vault));
-        await this.savePluginData();
-        this.refreshViews();
-      }
+      if (!Array.isArray(result.vaults)) return false;
+      this.data.vaultList = result.vaults;
+      result.vaults.forEach((vault) => this.rememberEncryptionInfo(vault.vaultId, vault));
+      await this.savePluginData();
+      this.refreshViews();
+      return true;
     } catch (error) {
-      // non-fatal (offline / transient)
+      return false; // non-fatal (offline / transient)
     }
   }
 
@@ -1539,6 +2434,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       this.data.remoteUpdatedAt = "";
       this.data.syncedHashes = {};
       this.data.vaultStats.syncedFiles = 0;
+      this.data.lastVaultId = target.vaultId;
       this.uploadedSignatures = {};
       this.dirtyUploadPaths = new Set();
       this.pendingUploadsAtOpen = new Set();
@@ -1549,6 +2445,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
       // trashes nothing local), then seed the upload cache from disk so the first
       // auto-sync doesn't push leftover local-only files into the target.
       try {
+        // Best-effort: lets a brand-new device adopt this vault on sign-in rather
+        // than creating an empty one beside it.
+        try { await this.api("/me/last-vault", { method: "POST", body: { vaultId: target.vaultId } }); }
+        catch (error) { /* the vault registers on first sync anyway */ }
         await this.fetchVaultMembers();
         await this.fetchPlan();
         await this.pullLatest();
@@ -1558,6 +2458,11 @@ module.exports = class SyncDeckPlugin extends Plugin {
         this.seedUploadSignaturesFromDisk();
         new Notice(`Switched vault, but the first pull failed: ${error.message}. It will retry automatically.`);
       }
+    } catch (error) {
+      // Without this, a rejected unlock (a wrong recovery key, a bad vault
+      // password) died as an unhandled rejection — the modal just closed and the
+      // user was never told why nothing happened. The callers do not await.
+      new Notice(`Could not open that vault: ${error.message}`);
     } finally {
       if (started) this.data.syncEnabled = true;
       this.data.syncProgress = 0;
@@ -1622,6 +2527,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
       if (me.usage && Number(me.usage.storageBytes) >= 0) this.data.storageUsedMb = Math.round(Number(me.usage.storageBytes) / 1024 / 1024);
       this.data.billingEnabled = !!me.billingEnabled;
       this.data.billingYearly = !!me.billingYearly;
+      this.applyAccountHints(me);
       await this.savePluginData();
       this.refreshViews();
     } catch (error) {
@@ -2184,10 +3090,59 @@ module.exports = class SyncDeckPlugin extends Plugin {
         await this.markVaultAccessDenied("poll");
         return;
       }
+      if (isVaultLockedError(error)) {
+        await this.markVaultLocked();
+        return;
+      }
       this.data.serverStatus = "offline";
       this.pushQueueItem("pull", "Remote vault", 0, `failed: ${error.message}`);
       await this.savePluginData();
     }
+  }
+
+  // The active vault needs a key this device does not have. Pause sync (so the
+  // queue stops filling with the same failure) and let the panel offer Unlock.
+  async markVaultLocked() {
+    if (this.data.vaultLocked && !this.data.syncEnabled) return;
+    this.data.vaultLocked = true;
+    this.data.syncEnabled = false;
+    this.data.serverStatus = "online";
+    this.pushQueueItem("pull", "Remote vault", 0, "failed: vault is locked on this device");
+    await this.savePluginData();
+    this.refreshViews();
+    new Notice(`${this.data.workspace || "This vault"} is encrypted and locked on this device. Unlock it from the Sync Deck panel.`);
+  }
+
+  activeVaultIsLocked() {
+    return this.activeEncryptionVersion() === PROTOCOL_VERSION
+      && !(this.data.vaultKeys && this.data.vaultKeys[this.data.vaultId]);
+  }
+
+  // Unlock the ACTIVE vault. The vault switcher can only ever open a DIFFERENT
+  // vault, so without this a locked active vault had no way back at all.
+  async unlockActiveVault() {
+    const vaultId = this.data.vaultId;
+    const listed = (this.data.vaultList || []).find((vault) => vault && vault.vaultId === vaultId);
+    const vault = listed && Number(listed.encryptionVersion) === PROTOCOL_VERSION ? listed : {
+      vaultId,
+      workspace: this.data.workspace,
+      encryptionVersion: PROTOCOL_VERSION,
+      keyCheck: this.data.vaultKeyChecks[vaultId] || "",
+    };
+    let unlocked = null;
+    try {
+      unlocked = await this.ensureVaultKeyFor(vault);
+    } catch (error) {
+      new Notice(`Could not unlock this vault: ${error.message}`);
+      return false;
+    }
+    if (!unlocked) return false;
+    this.data.vaultLocked = false;
+    this.data.syncEnabled = true;
+    await this.savePluginData();
+    this.refreshViews();
+    new Notice(`${this.data.workspace || "This vault"} is unlocked. Sync is on.`);
+    return true;
   }
 
   async pullLatest(options = {}) {
@@ -2446,6 +3401,10 @@ module.exports = class SyncDeckPlugin extends Plugin {
         await this.markVaultAccessDenied("pull");
         return;
       }
+      if (isVaultLockedError(error)) {
+        await this.markVaultLocked();
+        return;
+      }
       this.data.serverStatus = "offline";
       this.pushQueueItem("pull", "Remote vault", 0, `failed: ${error.message}`);
       await this.savePluginData();
@@ -2612,6 +3571,38 @@ module.exports = class SyncDeckPlugin extends Plugin {
     }, 250);
   }
 
+  // Fields /me carries that are about the ACCOUNT rather than the active vault.
+  applyAccountHints(hints) {
+    if (!hints || typeof hints !== "object") return;
+    if (typeof hints.escrowEnabled === "boolean") this.data.escrowAvailable = hints.escrowEnabled;
+    // Only what the server holds — never proof that the user opted in.
+    if (typeof hints.hasEscrow === "boolean") this.data.escrowRemote = hints.hasEscrow;
+    if (typeof hints.lastVaultId === "string") this.data.lastVaultId = hints.lastVaultId;
+  }
+
+  // Fetch the account's vaults and decide which to open. Adopting one is
+  // destructive (switchToVault trashes the current vault's synced files), so it
+  // must never run on a list left over from a previous session or another
+  // account — hence the fetch has to have actually succeeded.
+  async chooseSignInVault(hints = {}) {
+    const listed = await this.fetchVaultList();
+    return listed ? this.pickVaultForSignIn(hints) : null;
+  }
+
+  // Which of the account's existing vaults this device should open on sign-in.
+  // null means "stay where we are": either we are already on one of them, or
+  // adopting would be destructive, or there is genuinely nothing to adopt.
+  pickVaultForSignIn(hints = {}) {
+    const list = Array.isArray(this.data.vaultList) ? this.data.vaultList : [];
+    if (!list.length) return null; // brand-new account: keep the local vault id
+    const byId = (id) => list.find((vault) => vault && vault.vaultId === id) || null;
+    if (byId(this.data.vaultId)) return null; // already on one of this account's vaults
+    // switchToVault trashes the current vault's synced files. Adopting is only
+    // ever automatic when this device has nothing synced to lose.
+    if (this.getRemoteKnownPaths().size > 0) return null;
+    return byId(hints.lastVaultId) || (list.length === 1 ? list[0] : null);
+  }
+
   async signIn() {
     if (!this.hasAcceptedTerms()) { this.declineTerms(); return; }
     try {
@@ -2629,26 +3620,42 @@ module.exports = class SyncDeckPlugin extends Plugin {
         this.data.vaultId = uid("vault");
         this.data.syncEnabled = false;
         this.data.vaultInitialized = false;
+        // The previous account's vaults are not this account's to adopt.
+        this.data.vaultList = [];
+        await this.forgetEscrowLocally();
+        this.data.escrowRemote = false;
+        this.data.escrowDeclinedAt = "";
       }
       this.data.workspace = this.data.user.workspace || this.data.workspace;
       this.data.role = this.data.user.role || this.data.role;
       this.data.signedIn = true;
       this.data.serverStatus = "online";
       this.upsertCurrentUserMember();
-      try {
-        await this.registerVault();
-      } catch (error) {
-        if (error.status !== 403) throw error;
-        this.data.vaultId = uid("vault");
-        this.data.syncEnabled = false;
-        this.data.vaultInitialized = false;
-        await this.registerVault();
-      }
-      await this.fetchVaultMembers();
-      await this.fetchPlan();
-      await this.fetchVaultList();
       await this.savePluginData();
-      new Notice("Signed in with Google.");
+
+      // Find out what this account ALREADY has before creating anything. Signing
+      // in used to register this device's freshly generated vaultId first, which
+      // made the server mint an empty, unencrypted vault and hand ownership of it
+      // to the user — leaving their real encrypted vault reachable only through a
+      // recovery-key prompt. Nothing is registered here any more; the vault
+      // registers itself on the first sync.
+      let hints = {};
+      try { hints = await this.api("/me"); } catch (error) { hints = {}; }
+      this.applyAccountHints(hints);
+      const target = await this.chooseSignInVault(hints);
+      if (target) {
+        new Notice(`Signed in. Opening ${target.workspace || "your vault"}…`);
+        await this.switchToVault(target); // unlocks via vault password, else SDK1
+      } else {
+        await this.fetchVaultMembers();
+        const list = Array.isArray(this.data.vaultList) ? this.data.vaultList : [];
+        const onKnownVault = list.some((vault) => vault && vault.vaultId === this.data.vaultId);
+        new Notice(list.length && !onKnownVault
+          ? "Signed in. Choose which vault to open from the Vaults list."
+          : "Signed in with Google.");
+      }
+      await this.fetchPlan();
+      await this.savePluginData();
     } catch (error) {
       this.data.serverStatus = "offline";
       await this.savePluginData();
@@ -2672,6 +3679,9 @@ module.exports = class SyncDeckPlugin extends Plugin {
     this.data.signedIn = false;
     this.data.syncEnabled = false;
     this.data.authToken = "";
+    // Stale after sign-out: a later sign-in must re-fetch before adopting anything.
+    this.data.vaultList = [];
+    this.setEscrowKey(null, null, false);
     await this.savePluginData();
     new Notice("Signed out.");
   }
@@ -2738,6 +3748,7 @@ module.exports = class SyncDeckPlugin extends Plugin {
           ? (recovery.copied ? "Encrypted vault started. Recovery key copied." : "Encrypted vault started. Open Recovery key now and save it.")
           : "Vault sync started.")
         : "Vault sync failed.");
+      if (synced && createdEncryptedVault) await this.offerVaultPassword();
     } else {
       this.data.syncEnabled = false;
       await this.savePluginData();

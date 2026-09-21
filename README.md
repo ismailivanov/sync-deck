@@ -17,11 +17,12 @@ It is also the cloud companion to [**Task Deck**](https://github.com/ismailivano
 
 - **Google sign-in** with no additional Sync Deck password.
 - **Automatic vault sync** for files and folders, plus manual **Sync now** and **Pull** controls.
-- **End-to-end encryption** for file contents, filenames, folder paths, and synced Task Deck board/card identifiers. Keys are created and kept on member devices, not on the Sync Deck server.
+- **End-to-end encryption** for file contents, filenames, folder paths, and synced Task Deck board/card identifiers. Keys are created on member devices, and the server never receives a usable vault key.
 - **Multiple synced vaults** that can be inspected, opened, renamed, switched, closed, or deleted without mixing their contents.
 - **Explicit first sync**: nothing is uploaded until you create or open a vault and choose whether to include the files already on the device.
 - **Shared vaults** with invite codes, Admin and Worker roles, a visible member list, and live editor presence.
 - **Encrypted sharing and recovery** with `SD1` invite codes and user-held `SDK1` recovery keys.
+- **Optional vault password** so signing in on a new device unlocks your vaults without pasting a recovery key. Your keys are sealed with it on your own device; the password never reaches the server. See the [trade-off](docs/E2EE.md#vault-password).
 - **Owner-controlled key rotation** through a fully verified replacement vault when a recovery key or member access needs to be retired.
 - **Recoverable file handling**: files removed during a vault switch or leave flow go through Obsidian's trash.
 - **Storage visibility** with current usage, per-file limits, sync state, and recent activity in one panel.
@@ -61,9 +62,9 @@ Sync Deck is a hosted cloud service, so a few things to know up front:
   - **`api.syncdeck.cloud`** — the Sync Deck backend (hosted in Germany, EU) that stores and delivers the files you choose to sync and powers presence, invites, and roles.
   - **Google** — to sign you in (Sync Deck receives your email, name, and profile picture).
   - **Stripe** — to process Pro payments (your full card details are never sent to Sync Deck).
-- **End-to-end encrypted vault data.** New vaults encrypt file contents, filenames, folder paths, and Task Deck board/card identifiers before upload. The server stores ciphertext and does not receive the vault key.
+- **End-to-end encrypted vault data.** New vaults encrypt file contents, filenames, folder paths, and Task Deck board/card identifiers before upload. The server stores ciphertext and never receives the vault key or your vault password. If you turn on the optional vault password, the server additionally stores your vault keys **sealed** under a key derived from that password on your device — it cannot open them, but anyone who obtains those sealed records could try to guess the password offline. Read [Vault password](docs/E2EE.md#vault-password) before turning it on.
 - **Metadata remains visible.** The service still processes account identity, vault display name, membership and roles, billing status, IP address, file counts and encrypted sizes, server timestamps, and presence timing/coordinates. Read the [E2EE design and threat model](docs/E2EE.md) before relying on it for sensitive work.
-- **Recovery is your responsibility.** Keep the `SDK1` recovery key somewhere safe. Sync Deck cannot reset it or decrypt the vault if every member loses it. An `SD1` invite contains the vault key, so share it through a private channel.
+- **Recovery is your responsibility.** Keep the `SDK1` recovery key somewhere safe. Sync Deck cannot reset it, cannot reset a vault password, and cannot decrypt the vault if every member loses both. An `SD1` invite contains the vault key, so share it through a private channel.
 - **Legacy vaults.** Vaults created before E2EE remain marked **Legacy** until the owner selects **Enable E2EE**. Migration verifies an encrypted replacement before deleting the old server copy and requires existing members to be invited again.
 - **Privacy & terms.** What is collected and your rights (including GDPR and CCPA) are set out in the [Terms of Service & Privacy Notice](TERMS.md). You accept these in the plugin before syncing begins.
 

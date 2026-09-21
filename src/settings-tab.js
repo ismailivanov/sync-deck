@@ -34,6 +34,43 @@ class SyncDeckSettingTab extends PluginSettingTab {
           .onClick(() => this.plugin.data.signedIn ? this.plugin.signOut() : this.plugin.signIn());
       });
 
+    const data = this.plugin.data;
+    // Shown even when the server has the feature off, as long as a sealed copy
+    // may still exist for this account — otherwise there is no way to remove it.
+    if (data.signedIn && (data.escrowAvailable !== false || data.escrowRemote || this.plugin.escrowIsConfirmed())) {
+      new Setting(containerEl)
+        .setName("Vault password")
+        .setDesc(this.plugin.escrowIsConfirmed()
+          ? "On. Signing in on a new device unlocks your encrypted vaults. The server never sees the password."
+          : data.escrowRemote
+          ? "On for this account, but not yet used on this device."
+          : "Off. A new device needs the SDK1 recovery key to unlock an encrypted vault.")
+        .addButton((button) => {
+          // Change works without local proof — it asks for the current password —
+          // so an account that has one is never stuck on "Set up".
+          const joined = this.plugin.escrowIsConfirmed() || data.escrowRemote;
+          button
+            .setButtonText(joined ? "Change" : "Set up")
+            .onClick(async () => {
+              if (joined) await this.plugin.changeVaultPassword();
+              else await this.plugin.setUpVaultPassword();
+              this.display();
+            });
+        })
+        .addButton((button) => {
+          // The panel is not the only way out: a failed removal must be
+          // retryable from here too.
+          const joined = this.plugin.escrowIsConfirmed() || data.escrowRemote;
+          button
+            .setButtonText("Turn off")
+            .setDisabled(!joined)
+            .onClick(async () => {
+              await this.plugin.disableVaultPassword();
+              this.display();
+            });
+        });
+    }
+
     new Setting(containerEl)
       .setName("API server")
       .setDesc("Cloud API server for auth and vault registration.")
