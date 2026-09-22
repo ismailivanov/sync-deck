@@ -48,7 +48,7 @@ const DEFAULT_DATA = {
   storageLimitMb: 250,
   fileLimitMb: 10,
   plan: "free",
-  boardLimit: 1,
+  boardLimit: null, // Task Deck boards are not capped; the server is authoritative
   billingEnabled: false,
   billingYearly: false,
   onboarded: false,
@@ -1841,13 +1841,13 @@ class UpgradeModal extends Modal {
     contentEl.addClass("sd-upgrade-modal");
 
     contentEl.createEl("h2", { text: "Sync Deck Pro" });
-    contentEl.createEl("p", { cls: "sd-upgrade-sub", text: "More space, bigger files, and unlimited boards." });
+    contentEl.createEl("p", { cls: "sd-upgrade-sub", text: "More space and much bigger files." });
 
     // Feature comparison (marketing copy — keep in sync with the server plan limits).
     const features = [
       { label: "Storage", free: "250 MB", pro: "5 GB" },
       { label: "Max file size (images & video)", free: "10 MB", pro: "250 MB" },
-      { label: "Task Deck boards", free: "1", pro: "Unlimited" },
+      { label: "Task Deck boards", free: "Unlimited", pro: "Unlimited" },
       { label: "Real-time sync, presence, invites", free: "✓", pro: "✓" },
     ];
     const table = contentEl.createDiv({ cls: "sd-plan-compare" });

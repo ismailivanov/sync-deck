@@ -45,7 +45,7 @@ const DEFAULT_DATA = {
   storageLimitMb: 250,
   fileLimitMb: 10,
   plan: "free",
-  boardLimit: 1,
+  boardLimit: null, // Task Deck boards are not capped; the server is authoritative
   billingEnabled: false,
   billingYearly: false,
   onboarded: false,

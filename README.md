@@ -45,7 +45,7 @@ After setup, local edits are queued in the background. Use **Sync now** for an i
 |---|---|---|
 | Storage | 250 MB | 5 GB |
 | Max file size (images, video) | 10 MB | 250 MB |
-| Synced [Task Deck](https://github.com/ismailivanov/task-deck) boards | 1 | Unlimited |
+| Synced [Task Deck](https://github.com/ismailivanov/task-deck) boards | Unlimited | Unlimited |
 | Real-time sync, presence, invites, roles | ✓ | ✓ |
 
 Pro checkout is **$4 / month**. A **$39 / year** option is shown in the plugin when yearly billing is available. The in-app upgrade panel is the source of truth for currently available billing intervals.
